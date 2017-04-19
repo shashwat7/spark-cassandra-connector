@@ -1,26 +1,22 @@
 package com.datastax.spark.connector.cql
 
-
 import com.datastax.spark.connector.SparkCassandraITWordSpecBase
-import com.datastax.spark.connector.embedded.EmbeddedCassandra
+import com.datastax.spark.connector.embedded.{EmbeddedCassandra, YamlTransformations}
 import com.datastax.spark.connector.embedded.SparkTemplate._
 import com.datastax.spark.connector.types._
 import org.scalatest.Inspectors._
 
-
 class SchemaSpec extends SparkCassandraITWordSpecBase {
-
-  useCassandraConfig(Seq("cassandra-default.yaml.template"))
-  val conn = CassandraConnector(defaultConf)
+  useCassandraConfig(Seq(YamlTransformations.Default))
+  override val conn = CassandraConnector(defaultConf)
 
   conn.withSessionDo { session =>
+    createKeyspace(session)
+
     session.execute(
-      """CREATE KEYSPACE IF NOT EXISTS schema_test
-        |  WITH REPLICATION = { 'class': 'SimpleStrategy', 'replication_factor': 1 }""".stripMargin)
+      s"""CREATE TYPE $ks.address (street varchar, city varchar, zip int)""")
     session.execute(
-      """CREATE TYPE schema_test.address (street varchar, city varchar, zip int)""")
-    session.execute(
-      """CREATE TABLE schema_test.test(
+      s"""CREATE TABLE $ks.test(
         |  k1 int,
         |  k2 varchar,
         |  k3 timestamp,
@@ -46,35 +42,39 @@ class SchemaSpec extends SparkCassandraITWordSpecBase {
         |  PRIMARY KEY ((k1, k2, k3), c1, c2, c3)
         |)
       """.stripMargin)
+    session.execute(
+      s"""CREATE INDEX test_d9_map_idx ON $ks.test (keys(d9_map))""")
+    session.execute(
+      s"""CREATE INDEX test_d7_int_idx ON $ks.test (d7_int)""")
   }
 
   val schema = Schema.fromCassandra(conn)
 
   "A Schema" should {
     "allow to get a list of keyspaces" in {
-      schema.keyspaces.map(_.keyspaceName) should contain("schema_test")
+      schema.keyspaces.map(_.keyspaceName) should contain(ks)
     }
     "allow to look up a keyspace by name" in {
-      val ks = schema.keyspaceByName("schema_test")
-      ks.keyspaceName shouldBe "schema_test"
+      val keyspace = schema.keyspaceByName(ks)
+      keyspace.keyspaceName shouldBe ks
     }
   }
 
   "A KeyspaceDef" should {
     "allow to get a list of tables in the given keyspace" in {
-      val ks = schema.keyspaceByName("schema_test")
-      ks.tables.map(_.tableName).toSet shouldBe Set("test")
+      val keyspace = schema.keyspaceByName(ks)
+      keyspace.tables.map(_.tableName).toSet shouldBe Set("test")
     }
     "allow to look up a table by name" in {
-      val ks = schema.keyspaceByName("schema_test")
-      val table = ks.tableByName("test")
+      val keyspace = schema.keyspaceByName(ks)
+      val table = keyspace.tableByName("test")
       table.tableName shouldBe "test"
     }
   }
 
   "A TableDef" should {
-    val ks = schema.keyspaceByName("schema_test")
-    val table = ks.tableByName("test")
+    val keyspace = schema.keyspaceByName(ks)
+    val table = keyspace.tableByName("test")
 
     "allow to read column definitions by name" in {
       table.columnByName("k1").columnName shouldBe "k1"
@@ -129,6 +129,15 @@ class SchemaSpec extends SparkCassandraITWordSpecBase {
       val udt = table.columnByName("d16_address").columnType.asInstanceOf[UserDefinedType]
       udt.columnNames shouldBe Seq("street", "city", "zip")
       udt.columnTypes shouldBe Seq(VarCharType, VarCharType, IntType)
+    }
+
+    "should not recognize column with collection index as indexed" in {
+      table.indexedColumns.size shouldBe 1
+      table.indexedColumns.head.columnName shouldBe "d7_int"
+    }
+
+    "should hold all indices retrieved from cassandra" in {
+      table.indexes.size shouldBe 2
     }
   }
 

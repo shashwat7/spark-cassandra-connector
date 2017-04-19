@@ -1,12 +1,14 @@
 package com.datastax.spark.connector.mapper
 
-import com.datastax.spark.connector.{ColumnRef, ColumnName}
-import com.datastax.spark.connector.cql.{StructDef, ColumnDef, RegularColumn, PartitionKeyColumn, TableDef}
+import com.datastax.driver.core.ProtocolVersion
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+import com.datastax.spark.connector.{ColumnName, ColumnRef}
+import com.datastax.spark.connector.cql.{ColumnDef, PartitionKeyColumn, RegularColumn, StructDef, TableDef}
 import com.datastax.spark.connector.types.ColumnType
 import com.datastax.spark.connector.util.ReflectionUtil
 
 import scala.reflect.ClassTag
-import scala.reflect.runtime.universe.{typeOf, Type, TypeTag}
+import scala.reflect.runtime.universe.{Type, TypeTag, typeOf}
 import scala.util.{Success, Try}
 
 /** A [[ColumnMapper]] that assumes camel case naming convention for property accessors and constructor
@@ -39,7 +41,7 @@ class DefaultColumnMapper[T : TypeTag](columnNameOverride: Map[String, String] =
   private def setterNameToPropertyName(str: String) =
     str.substring(0, str.length - SetterSuffix.length)
 
-  private val tpe = TypeTag.synchronized(implicitly[TypeTag[T]].tpe)
+  private val tpe = SparkReflectionLock.synchronized(implicitly[TypeTag[T]].tpe)
   private val constructorParams = ReflectionUtil.constructorParams(tpe)
   private val getters = ReflectionUtil.getters(tpe)
   private val setters = ReflectionUtil.setters(tpe)
@@ -88,7 +90,7 @@ class DefaultColumnMapper[T : TypeTag](columnNameOverride: Map[String, String] =
   }
 
   override def columnMapForWriting(
-      struct: StructDef, 
+      struct: StructDef,
       selectedColumns: IndexedSeq[ColumnRef]): ColumnMapForWriting = {
 
     val columns = columnByName(selectedColumns)
@@ -116,7 +118,11 @@ class DefaultColumnMapper[T : TypeTag](columnNameOverride: Map[String, String] =
     } yield getter
   }
 
-  override def newTable(keyspaceName: String, tableName: String): TableDef = {
+  override def newTable(
+    keyspaceName: String,
+    tableName: String,
+    protocolVersion: ProtocolVersion = ProtocolVersion.NEWEST_SUPPORTED): TableDef = {
+
     // filter out inherited scala getters, because they are very likely
     // not the properties users want to map
     val inheritedScalaGetterNames = inheritedScalaGetters.map(_._1)
@@ -131,7 +137,7 @@ class DefaultColumnMapper[T : TypeTag](columnNameOverride: Map[String, String] =
     val getterTypes = getters.toMap
     val mappableProperties = propertyNames
         .map { name => (name, getterTypes(name)) }
-        .map { case (name, tpe) => (name, Try(ColumnType.fromScalaType(tpe))) }
+        .map { case (name, tpe) => (name, Try(ColumnType.fromScalaType(tpe, protocolVersion))) }
         .collect { case (name, Success(columnType)) => (name, columnType) }
 
     require(

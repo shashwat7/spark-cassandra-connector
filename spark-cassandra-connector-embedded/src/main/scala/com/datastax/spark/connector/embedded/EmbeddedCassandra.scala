@@ -2,109 +2,88 @@ package com.datastax.spark.connector.embedded
 
 import java.net.InetAddress
 
-import org.apache.commons.configuration.ConfigurationException
+import com.datastax.spark.connector.embedded.YamlTransformations.CassandraConfiguration
 
+import scala.collection.mutable
 
 /** A utility trait for integration testing.
   * Manages *one* single Cassandra server at a time and enables switching its configuration.
   * This is not thread safe, and test suites must not be run in parallel,
-  * because they will "steal" the server.*/
+  * because they will "steal" the server. */
 trait EmbeddedCassandra {
+
+  import EmbeddedCassandra._
 
   /** Implementation hook. */
   def clearCache(): Unit
 
+  def versionGreaterThanOrEquals(major: Int, minor: Int = 0): Boolean = {
+    (major < cassandraMajorVersion) ||
+      (major == cassandraMajorVersion && minor <= cassandraMinorVersion)
+  }
+
   /** Switches the Cassandra server to use the new configuration if the requested configuration
     * is different than the currently used configuration. When the configuration is switched, all
     * the state (including data) of the previously running cassandra cluster is lost.
+    *
     * @param configTemplates name of the cassandra.yaml template resources
     * @param forceReload if set to true, the server will be reloaded fresh
-    *   even if the configuration didn't change */
-  def useCassandraConfig(configTemplates: Seq[String], forceReload: Boolean = false) {
-    import EmbeddedCassandra._
-    import UserDefinedProperty._
+    *                    even if the configuration didn't change */
+  def useCassandraConfig(configTemplates: Seq[YamlTransformations], forceReload: Boolean = false) {
+    import com.datastax.spark.connector.embedded.UserDefinedProperty._
+
     require(hosts.isEmpty || configTemplates.size <= hosts.size,
       "Configuration templates can't be more than the number of specified hosts")
+    require(!configTemplates.contains(null), "Configuration template cannot be null")
 
     if (getProperty(HostProperty).isEmpty) {
       clearCache()
 
-      val templatePairs = configTemplates.zipAll(currentConfigTemplates, "missing value", null)
-      for (i <- configTemplates.indices) {
-        require(configTemplates(i) != null && configTemplates(i).trim.nonEmpty,
-          "Configuration template can't be null or empty")
+      val providedConfTmplts = configTemplates.zipWithIndex.map(_.swap).toMap
 
-        if (templatePairs(i)._2 != templatePairs(i)._1 || forceReload) {
-          cassandraRunners.lift(i).flatten.foreach(_.destroy())
-          cassandraRunners = cassandraRunners.patch(i,
-            Seq(Some(new CassandraRunner(configTemplates(i), getProps(i)))), 1)
-          currentConfigTemplates = currentConfigTemplates.patch(i, Seq(configTemplates(i)), 1)
+      // destroy the currently running nodes if: forceReload, template was not provided
+      // or template does not match the currently used one
+      for (id <- cassandraRunners.keySet.toList) {
+        val tmpltProvided = providedConfTmplts.contains(id)
+        val providedTmpltMatchesCur = providedConfTmplts.get(id) == currentConfigTemplates.get(id)
+        if (forceReload || !tmpltProvided || !providedTmpltMatchesCur) {
+          destroyAndRemoveRunner(id)
         }
       }
-    }
-  }
-}
 
-object UserDefinedProperty {
-
-  trait TypedProperty {
-    type ValueType
-    def convertValueFromString(str: String): ValueType
-    def checkValueType(obj: Any): ValueType
-  }
-
-  trait IntProperty extends TypedProperty {
-    type ValueType = Int
-    def convertValueFromString(str: String) = str.toInt
-    def checkValueType(obj: Any) =
-      obj match {
-        case x: Int => x
-        case _ => throw new ClassCastException (s"Expected Int but found ${obj.getClass.getName}")
+      // start nodes for provided template which are not already runnning
+      for ((id, tmplt) <- (providedConfTmplts -- cassandraRunners.keySet).toList) {
+        createAndAddRunner(id, tmplt)
       }
-  }
-
-  trait InetAddressProperty extends TypedProperty {
-    type ValueType = InetAddress
-    def convertValueFromString(str: String) = InetAddress.getByName(str)
-    def checkValueType(obj: Any) =
-      obj match {
-        case x: InetAddress => x
-        case _ => throw new ClassCastException (s"Expected InetAddress but found ${obj.getClass.getName}")
-      }
-  }
-
-  abstract sealed class NodeProperty(val propertyName: String) extends TypedProperty
-  case object HostProperty extends NodeProperty("IT_TEST_CASSANDRA_HOSTS") with InetAddressProperty
-  case object PortProperty extends NodeProperty("IT_TEST_CASSANDRA_PORTS") with IntProperty
-
-  private def getValueSeq(propertyName: String): Seq[String] = {
-    sys.env.get(propertyName) match {
-      case Some(p) => p.split(",").map(e => e.trim).toIndexedSeq
-      case None => IndexedSeq()
     }
   }
 
-  private def getValueSeq(nodeProperty: NodeProperty): Seq[nodeProperty.ValueType] =
-    getValueSeq(nodeProperty.propertyName).map(x => nodeProperty.convertValueFromString(x))
+  private def destroyAndRemoveRunner(id: Int): Unit = {
+    cassandraRunners.get(id).foreach(_.destroy())
+    cassandraRunners -= id
+    currentConfigTemplates -= id
+  }
 
-  val hosts = getValueSeq(HostProperty)
-  val ports = getValueSeq(PortProperty)
+  private def createAndAddRunner(id: Int, configTemplate: YamlTransformations): Unit = {
+    cassandraRunners += id -> new CassandraRunner(configTemplate, getBaseYamlTransformer(id))
+    currentConfigTemplates += id -> configTemplate
+  }
 
-  def getProperty(nodeProperty: NodeProperty): Option[String] =
-    sys.env.get(nodeProperty.propertyName)
-  
-  def getPropertyOrThrowIfNotFound(nodeProperty: NodeProperty): String =
-    getProperty(nodeProperty).getOrElse(
-      throw new ConfigurationException(s"Missing ${nodeProperty.propertyName} in system environment"))
 }
+
 
 object EmbeddedCassandra {
 
-  import UserDefinedProperty._
-  
-  private def countCommaSeparatedItemsIn(s: String): Int = 
-    s.count(_ == ',')
-  
+  import com.datastax.spark.connector.embedded.UserDefinedProperty._
+
+  val DEFAULT_CASSANDRA_VERSION = "3.0.8"
+  val cassandraVersion = System.getProperty("test.cassandra.version", DEFAULT_CASSANDRA_VERSION)
+  val (cassandraMajorVersion, cassandraMinorVersion) = {
+    val parts = cassandraVersion.split("\\.")
+    require(parts.length >= 2, s"Can't determine Cassandra Version from $cassandraVersion : ${parts.mkString(",")}")
+    (parts(0).toInt, parts(1).toInt)
+  }
+
   getProperty(HostProperty) match {
     case None =>
     case Some(hostsStr) =>
@@ -116,109 +95,63 @@ object EmbeddedCassandra {
         "IT_TEST_CASSANDRA_HOSTS must have the same size as IT_TEST_CASSANDRA_NATIVE_PORTS")
   }
 
-  private[connector] var cassandraRunners: IndexedSeq[Option[CassandraRunner]] = IndexedSeq(None)
+  private val cassandraPorts: CassandraPorts = {
+    if (hosts.nonEmpty || ports.nonEmpty) {
+      CassandraPorts(ports)
+    } else {
+      DynamicCassandraPorts()
+    }
+  }
 
-  private[connector] var currentConfigTemplates: IndexedSeq[String] = IndexedSeq()
+  private[connector] var cassandraRunners = mutable.HashMap[Int, CassandraRunner]()
 
-  def getProps(index: Integer): Map[String, String] = {
+  private[connector] var currentConfigTemplates = mutable.HashMap[Int, YamlTransformations]()
+
+  private def countCommaSeparatedItemsIn(s: String): Int = s.count(_ == ',')
+
+  def getBaseYamlTransformer(index: Integer): CassandraConfiguration = {
     require(hosts.isEmpty || index < hosts.length, s"$index index is overflow the size of ${hosts.length}")
     val host = getHost(index).getHostAddress
-    Map(
-      "seeds"                 -> host,
-      "storage_port"          -> getStoragePort(index).toString,
-      "ssl_storage_port"      -> getSslStoragePort(index).toString,
-      "native_transport_port" -> getPort(index).toString,
-      "jmx_port"              -> getJmxPort(index).toString,
-      "rpc_address"           -> host,
-      "listen_address"        -> host,
-      "cluster_name"          -> getClusterName(index),
-      "keystore_path"         -> ClassLoader.getSystemResource("keystore").getPath)
+    YamlTransformations.CassandraConfiguration(
+      seeds = List.empty,
+      clusterName = getClusterName(index),
+      storagePort = cassandraPorts.getStoragePort(index),
+      sslStoragePort = cassandraPorts.getSslStoragePort(index),
+      nativeTransportPort = getPort(index),
+      rpcAddress = host,
+      listenAddress = host,
+      jmxPort = cassandraPorts.getJmxPort(index)
+    )
   }
 
-  def getStoragePort(index: Integer) = 7000 + index
-  def getSslStoragePort(index: Integer) = 7100 + index
-  def getJmxPort(index: Integer) = CassandraRunner.DefaultJmxPort + index
-  def getClusterName(index: Integer) = s"Test Cluster$index"
+  def getClusterName(index: Integer) = s"Test Cluster $index"
 
-  def getHost(index: Integer): InetAddress = getNodeProperty(index, HostProperty)
-  def getPort(index: Integer) = getNodeProperty(index, PortProperty)
+  def getHost(index: Integer): InetAddress =
+    if (hosts.isEmpty) InetAddress.getByName("127.0.0.1") else hosts(index)
 
-  private def getNodeProperty(index: Integer, nodeProperty: NodeProperty): nodeProperty.ValueType = {
-    nodeProperty.checkValueType {
-      nodeProperty match {
-        case PortProperty if ports.isEmpty => 9042 + index
-        case PortProperty if index < hosts.size => ports(index)
-        case HostProperty if hosts.isEmpty => InetAddress.getByName("127.0.0.1")
-        case HostProperty if index < hosts.size => hosts(index)
-        case _ => throw new RuntimeException(s"$index index is overflow the size of ${hosts.size}")
-      }
-    }
-  }   
+  def getPort(index: Integer): Int = cassandraPorts.getRpcPort(index)
 
-  Runtime.getRuntime.addShutdownHook(new Thread(new Runnable {
-    override def run() = cassandraRunners.flatten.foreach(_.destroy())
-  }))
-}
-
-private[connector] class CassandraRunner(val configTemplate: String, props: Map[String, String])
-  extends Embedded {
-
-  import java.io.{File, FileOutputStream, IOException}
-  import org.apache.cassandra.io.util.FileUtils
-  import com.google.common.io.Files
-  import CassandraRunner._
-
-  val tempDir = mkdir(new File(Files.createTempDir(), "cassandra-driver-spark"))
-  val workDir = mkdir(new File(tempDir, "cassandra"))
-  val dataDir = mkdir(new File(workDir, "data"))
-  val commitLogDir = mkdir(new File(workDir, "commitlog"))
-  val cachesDir = mkdir(new File(workDir, "saved_caches"))
-  val confDir = mkdir(new File(tempDir, "conf"))
-  val confFile = new File(confDir, "cassandra.yaml")
-
-  private val properties = Map("cassandra_dir" -> workDir.toString) ++ props
-  closeAfterUse(ClassLoader.getSystemResourceAsStream(configTemplate)) { input =>
-    closeAfterUse(new FileOutputStream(confFile)) { output =>
-      copyTextFileWithVariableSubstitution(input, output, properties)
+  def release(): Unit = {
+    cassandraPorts match {
+      case pr: DynamicCassandraPorts => pr.release()
+      case _ =>
     }
   }
 
-  private val classPath = System.getProperty("java.class.path")
-  private val javaBin = System.getProperty("java.home") + "/bin/java"
-  private val cassandraConfProperty = "-Dcassandra.config=file:" + confFile.toString
-  private val superuserSetupDelayProperty = "-Dcassandra.superuser_setup_delay_ms=0"
-  private val jmxPort = props.getOrElse("jmx_port", DefaultJmxPort)
-  private val jmxPortProperty = s"-Dcassandra.jmx.local.port=$jmxPort"
-  private val sizeEstimatesUpdateIntervalProperty =
-    s"-Dcassandra.size_recorder_interval=$SizeEstimatesUpdateIntervalInSeconds"
-  private val jammAgent = classPath.split(File.pathSeparator).find(_.matches(".*jamm.*\\.jar"))
-  private val jammAgentProperty = jammAgent.map("-javaagent:" + _).getOrElse("")
-  private val cassandraMainClass = "org.apache.cassandra.service.CassandraDaemon"
+  private val shutdownThread: Thread = new Thread("Shutdown embedded C* hook thread") {
+    override def run() = {
+      shutdown()
+    }
+  }
 
-  private val process = new ProcessBuilder()
-    .command(javaBin,
-      "-Xms2G", "-Xmx2G", "-Xmn384M", "-XX:+UseConcMarkSweepGC",
-      sizeEstimatesUpdateIntervalProperty,
-      cassandraConfProperty, jammAgentProperty, superuserSetupDelayProperty, jmxPortProperty,
-      "-cp", classPath, cassandraMainClass, "-f")
-    .inheritIO()
-    .start()
+  Runtime.getRuntime.addShutdownHook(shutdownThread)
 
-  val nativePort =  props.get("native_transport_port").get.toInt
-  if (!waitForPortOpen(InetAddress.getByName(props.get("rpc_address").get), nativePort, 100000))
-    throw new IOException("Failed to start Cassandra.")
+  private[connector] def shutdown(): Unit = {
+    cassandraRunners.values.foreach(_.destroy())
+    release()
+  }
 
-  def destroy() {
-    process.destroy()
-    process.waitFor()
-    FileUtils.deleteRecursive(tempDir)
-    tempDir.delete()
+  private[connector] def removeShutdownHook(): Boolean = {
+    Runtime.getRuntime.removeShutdownHook(shutdownThread)
   }
 }
-
-object CassandraRunner {
-  val SizeEstimatesUpdateIntervalInSeconds = 5
-  val DefaultJmxPort = 7199
-}
-
-

@@ -53,11 +53,11 @@ object InputMetricsUpdater {
     groupSize: Int = DefaultGroupSize
   ): InputMetricsUpdater = {
 
-    val source = CassandraConnectorSource.instance
+    val source = MetricsUpdater.getSource(taskContext)
 
     if (readConf.taskMetricsEnabled) {
       val tm = taskContext.taskMetrics()
-      val inputMetrics = tm.getInputMetricsForReadMethod(DataReadMethod.Hadoop)
+      val inputMetrics = tm.inputMetrics
 
       if (source.isDefined)
         new CodahaleAndTaskMetricsUpdater(groupSize, source.get, inputMetrics)

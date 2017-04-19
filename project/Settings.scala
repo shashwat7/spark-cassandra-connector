@@ -16,20 +16,18 @@
 
 import java.io.File
 
-import scala.collection.mutable
 import scala.language.postfixOps
 
 import com.scalapenos.sbt.prompt.SbtPrompt.autoImport._
-import com.typesafe.sbt.SbtScalariform
-import com.typesafe.sbt.SbtScalariform._
 import com.typesafe.tools.mima.plugin.MimaKeys._
 import com.typesafe.tools.mima.plugin.MimaPlugin._
-import net.virtualvoid.sbt.graph.Plugin.graphSettings
 import sbt.Keys._
 import sbt._
-import sbtassembly.Plugin.AssemblyKeys._
-import sbtassembly.Plugin._
+import sbtassembly.AssemblyKeys._
+import sbtassembly.AssemblyPlugin._
+import sbtassembly._
 import sbtrelease.ReleasePlugin._
+import sbtsparkpackage.SparkPackagePlugin.autoImport._
 
 object Settings extends Build {
 
@@ -37,23 +35,30 @@ object Settings extends Build {
 
   val versionStatus = settingKey[Unit]("The Scala version used in cross-build reapply for '+ package', '+ publish'.")
 
-  def currentCommitSha = ("git rev-parse --short HEAD" !!).split('\n').head.trim
+  val mavenLocalResolver = BuildUtil.mavenLocalResolver
 
-  def versionSuffix = {
-    sys.props.get("publish.version.type").map(_.toLowerCase) match {
-      case Some("release") ⇒ ""
-      case Some("commit-release") ⇒ s"-$currentCommitSha"
-      case _ ⇒ "-SNAPSHOT"
-    }
-  }
+  val asfSnapshotsResolver = "ASF Snapshots" at "https://repository.apache.org/content/groups/snapshots"
+  val asfStagingResolver = "ASF Staging" at "https://repository.apache.org/content/groups/staging"
+
+  def currentVersion = ("git describe --tags --match v*" !!).trim.substring(1)
 
   lazy val buildSettings = Seq(
     organization         := "com.datastax.spark",
-    version in ThisBuild := s"1.5.0-M1$versionSuffix",
+    version in ThisBuild := currentVersion,
     scalaVersion         := Versions.scalaVersion,
     crossScalaVersions   := Versions.crossScala,
     crossVersion         := CrossVersion.binary,
     versionStatus        := Versions.status(scalaVersion.value, scalaBinaryVersion.value)
+  )
+
+  lazy val sparkPackageSettings = Seq(
+    spName := "datastax/spark-cassandra-connector",
+    sparkVersion := Versions.Spark,
+    spAppendScalaVersion := true,
+    spIncludeMaven := true,
+    spIgnoreProvided := true,
+    spShade := true,
+    credentials += Credentials(Path.userHome / ".ivy2" / ".credentials")
   )
 
   override lazy val settings = super.settings ++ buildSettings ++ Seq(
@@ -64,7 +69,7 @@ object Settings extends Build {
                   |A library that exposes Cassandra tables as Spark RDDs, writes Spark RDDs to
                   |Cassandra tables, and executes CQL queries in Spark applications.""".stringPrefix,
     homepage := Some(url("https://github.com/datastax/spark-cassandra-connector")),
-    licenses := Seq(("Apache License, Version 2.0", url("http://www.apache.org/licenses/LICENSE-2.0"))),
+    licenses := Seq(("Apache License 2.0", url("http://www.apache.org/licenses/LICENSE-2.0"))),
     promptTheme := ScalapenosTheme
   )
 
@@ -82,7 +87,11 @@ object Settings extends Build {
 
   val encoding = Seq("-encoding", "UTF-8")
 
-  lazy val projectSettings = graphSettings ++ Seq(
+  val installSparkTask = taskKey[Unit]("Optionally install Spark from Git to local Maven repository")
+
+  lazy val projectSettings = Seq(
+
+    concurrentRestrictions in Global += Tags.limit(Tags.Test, parallelTasks),
 
     aggregate in update := false,
 
@@ -130,11 +139,17 @@ object Settings extends Build {
     updateOptions := updateOptions.value.withCachedResolution(cachedResoluton = true),
 
     ivyLoggingLevel in ThisBuild := UpdateLogging.Quiet,
-    parallelExecution in ThisBuild := false,
-    parallelExecution in Global := false,
+    parallelExecution in ThisBuild := true,
+    parallelExecution in Global := true,
     apiMappings ++= DocumentationMapping.mapJarToDocURL(
       (managedClasspath in (Compile, doc)).value,
-      Dependencies.documentationMappings)
+      Dependencies.documentationMappings),
+    installSparkTask := {
+      val dir = new File(".").toPath
+      SparkInstaller(scalaBinaryVersion.value, dir)
+    },
+    resolvers ++= Seq(mavenLocalResolver, asfStagingResolver, asfSnapshotsResolver),
+    update <<= (installSparkTask, update) map {(_, out) => out}
   )
 
   lazy val mimaSettings = mimaDefaultSettings ++ Seq(
@@ -142,104 +157,34 @@ object Settings extends Build {
     binaryIssueFilters ++= Seq.empty
   )
 
-  lazy val defaultSettings = projectSettings ++ mimaSettings ++ releaseSettings ++ testSettings
+  lazy val defaultSettings = projectSettings ++ mimaSettings ++ releaseSettings ++ Testing.testSettings
 
   lazy val rootSettings = Seq(
-    cleanKeepFiles ++= Seq("resolution-cache", "streams", "spark-archives").map(target.value / _)
+    cleanKeepFiles ++= Seq("resolution-cache", "streams", "spark-archives").map(target.value / _),
+    updateOptions := updateOptions.value.withCachedResolution(true)
   )
-
-  lazy val demoSettings = projectSettings ++ noPublish ++ Seq(
-    publishArtifact in (Test,packageBin) := false,
-    javaOptions in run ++= Seq("-Djava.library.path=./sigar","-Xms128m", "-Xmx1024m", "-XX:+UseConcMarkSweepGC")
-  )
-
-  val testConfigs = inConfig(Test)(Defaults.testTasks) ++ inConfig(IntegrationTest)(Defaults.itSettings)
-
-  val pureTestClasspath = taskKey[Set[String]]("Show classpath which is obtained as (test:fullClasspath + it:fullClasspath) - compile:fullClasspath")
-
-  lazy val customTasks = Seq(
-    pureTestClasspath := {
-      val testDeps = (fullClasspath in Test value) map (_.data.getAbsolutePath) toSet
-      val itDeps = (fullClasspath in IntegrationTest value) map (_.data.getAbsolutePath) toSet
-      val compileDeps = (fullClasspath in Compile value) map (_.data.getAbsolutePath) toSet
-
-      val cp = (testDeps ++ itDeps) -- compileDeps
-
-      println("TEST_CLASSPATH=" + cp.mkString(File.pathSeparator))
-
-      cp
-    }
-  )
-  lazy val assembledSettings = defaultSettings ++ customTasks ++ sbtAssemblySettings
-
-  val testOptionSettings = Seq(
-    Tests.Argument(TestFrameworks.ScalaTest, "-oDF"),
-    Tests.Argument(TestFrameworks.JUnit, "-oDF", "-v", "-a")
-  )
-
-  lazy val testArtifacts = Seq(
-    artifactName in (Test,packageBin) := { (sv: ScalaVersion, module: ModuleID, artifact: Artifact) =>
-     baseDirectory.value.name + "-test_" + sv.binary + "-" + module.revision + "." + artifact.extension
-    },
-    artifactName in (IntegrationTest,packageBin) := { (sv: ScalaVersion, module: ModuleID, artifact: Artifact) =>
-      baseDirectory.value.name + "-it_" + sv.binary + "-" + module.revision + "." + artifact.extension
-    },
-    publishArtifact in Test := false,
-    publishArtifact in (Test,packageBin) := true,
-    publishArtifact in (IntegrationTest,packageBin) := true,
-    publish in (Test,packageBin) := (),
-    publish in (IntegrationTest,packageBin) := ()
-  )
-
-  lazy val testSettings = testConfigs ++ testArtifacts ++ graphSettings ++ Seq(
-    parallelExecution in Test := false,
-    parallelExecution in IntegrationTest := false,
-    javaOptions in IntegrationTest ++= Seq(
-      "-XX:MaxPermSize=256M", "-Xmx1g"
-    ),
-    testOptions in Test ++= testOptionSettings,
-    testOptions in IntegrationTest ++= testOptionSettings,
-    fork in Test := true,
-    fork in IntegrationTest := true,
-    managedSourceDirectories in Test := Nil,
-    (compile in IntegrationTest) <<= (compile in Test, compile in IntegrationTest) map { (_, c) => c },
-    managedClasspath in IntegrationTest <<= Classpaths.concat(managedClasspath in IntegrationTest, exportedProducts in Test)
-  )
-
-  lazy val japiSettings = Seq(
-    publishArtifact := true
-  )
-
-  lazy val kafkaDemoSettings = Seq(
-    excludeFilter in unmanagedSources := (CrossVersion.partialVersion(scalaVersion.value) match {
-      case Some((2, minor)) if minor < 11 => HiddenFileFilter || "*Scala211App*"
-      case _ => HiddenFileFilter || "*WordCountApp*"
-    }))
 
   lazy val sbtAssemblySettings = assemblySettings ++ Seq(
     parallelExecution in assembly := false,
-    jarName in assembly <<= (baseDirectory, version) map { (dir, version) => s"${dir.name}-assembly-$version.jar" },
+    assemblyJarName in assembly <<= (baseDirectory, version) map { (dir, version) => s"${dir.name}-assembly-$version.jar" },
     run in Compile <<= Defaults.runTask(fullClasspath in Compile, mainClass in (Compile, run), runner in (Compile, run)),
     assemblyOption in assembly ~= { _.copy(includeScala = false) },
-    mergeStrategy in assembly <<= (mergeStrategy in assembly) {
-      (old) => {
-        case PathList("com", "google", xs @ _*) => MergeStrategy.last
-        case x => old(x)
-      }
+    assemblyMergeStrategy in assembly := {
+      case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
+      case PathList("META-INF", xs @ _*) => MergeStrategy.last
+      case x =>
+        val oldStrategy = (assemblyMergeStrategy in assembly).value
+        oldStrategy(x)
+    },
+    assemblyShadeRules in assembly := {
+      val shadePackage = "shade.com.datastax.spark.connector"
+      Seq(
+        ShadeRule.rename("com.google.common.**" -> s"$shadePackage.google.common.@1").inAll,
+        ShadeRule.rename("com.google.thirdparty.publicsuffix.**" -> s"$shadePackage.google.thirdparty.publicsuffix.@1").inAll
+      )
     }
   )
 
-  lazy val formatSettings = SbtScalariform.scalariformSettings ++ Seq(
-    ScalariformKeys.preferences in Compile  := formattingPreferences,
-    ScalariformKeys.preferences in Test     := formattingPreferences
-  )
-
-  def formattingPreferences = {
-    import scalariform.formatter.preferences._
-    FormattingPreferences()
-      .setPreference(RewriteArrowSymbols, false)
-      .setPreference(AlignParameters, true)
-      .setPreference(AlignSingleLineCaseStatements, true)
-  }
+  lazy val assembledSettings = defaultSettings ++ Testing.testTasks ++ sbtAssemblySettings ++ sparkPackageSettings
 
 }

@@ -1,26 +1,25 @@
 package com.datastax.spark.connector.writer
 
 import com.datastax.spark.connector.cql.CassandraConnector
-import com.datastax.spark.connector.embedded.SparkTemplate._
 import com.datastax.spark.connector.embedded._
 import com.datastax.spark.connector._
 
 class TableWriterColumnNamesSpec extends SparkCassandraITAbstractSpecBase {
+  useCassandraConfig(Seq(YamlTransformations.Default))
+  useSparkConf(defaultConf)
 
-  useCassandraConfig(Seq("cassandra-default.yaml.template"))
-  useSparkConf(defaultSparkConf)
-
-  val conn = CassandraConnector(defaultConf)
+  override val conn = CassandraConnector(defaultConf)
 
   case class KeyValue(key: Int, group: Long)
 
-  val ks = "TableWriterColumnNamesSpec"
+  conn.withSessionDo { session =>
+    createKeyspace(session)
+    session.execute(s"""CREATE TABLE $ks.key_value (key INT, group BIGINT, value TEXT, PRIMARY KEY (key, group))""")
+  }
 
   before {
     conn.withSessionDo { session =>
-      session.execute(s"""CREATE KEYSPACE IF NOT EXISTS "$ks" WITH REPLICATION = { 'class': 'SimpleStrategy', 'replication_factor': 1 }""")
-      session.execute(s"""CREATE TABLE IF NOT EXISTS "$ks".key_value (key INT, group BIGINT, value TEXT, PRIMARY KEY (key, group))""")
-      session.execute(s"""TRUNCATE "$ks".key_value""")
+      session.execute(s"""TRUNCATE $ks.key_value""")
     }
   }
 

@@ -5,9 +5,14 @@ import java.io.ObjectOutputStream
 import scala.collection.JavaConversions._
 import scala.reflect.runtime.universe._
 
-import com.datastax.driver.core.{UDTValue => DriverUDTValue, ProtocolVersion, UserType, DataType}
+
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema
+
+import com.datastax.driver.core.{UDTValue => DriverUDTValue, UserType, DataType}
 import com.datastax.spark.connector.{ColumnName, UDTValue}
 import com.datastax.spark.connector.cql.{StructDef, FieldDef}
+import com.datastax.spark.connector.util.CodecRegistryUtil
 
 /** A Cassandra user defined type field metadata. It consists of a name and an associated column type.
   * The word `column` instead of `field` is used in member names because we want to treat UDT field
@@ -25,10 +30,10 @@ case class UserDefinedType(name: String, columns: IndexedSeq[UDTFieldDef])
   override type Column = FieldDef
 
   def isCollection = false
-  def scalaTypeTag = TypeTag.synchronized { implicitly[TypeTag[UDTValue]] }
+  def scalaTypeTag = SparkReflectionLock.synchronized { implicitly[TypeTag[UDTValue]] }
   def cqlTypeName = name
 
-  def converterToCassandra = new TypeConverter[UDTValue] {
+  def converterToCassandra = new NullableTypeConverter[UDTValue] {
     override def targetTypeTag = UDTValue.TypeTag
     override def convertPF = {
       case udtValue: UDTValue =>
@@ -39,6 +44,16 @@ case class UserDefinedType(name: String, columns: IndexedSeq[UDTFieldDef])
             val columnValue = columnConverter.convert(udtValue.getRaw(columnName))
             columnValue
           }
+        new UDTValue(columnNames, columnValues)
+      case dfGenericRow: GenericRowWithSchema =>
+        val columnValues =
+         for (i <- columns.indices) yield {
+           val columnName = columnNames(i)
+           val columnConverter = columnTypes(i).converterToCassandra
+           val dfSchemaIndex = dfGenericRow.schema.fieldIndex(columnName)
+           val columnValue = columnConverter.convert(dfGenericRow.get(dfSchemaIndex))
+           columnValue
+         }
         new UDTValue(columnNames, columnValues)
     }
   }
@@ -54,14 +69,14 @@ object UserDefinedType {
 
   /** Converts connector's UDTValue to Cassandra Java Driver UDTValue.
     * Used when saving data to Cassandra.  */
-  class DriverUDTValueConverter(dataType: UserType)(implicit protocolVersion: ProtocolVersion)
+  class DriverUDTValueConverter(dataType: UserType)
     extends TypeConverter[DriverUDTValue] {
 
     val fieldNames = dataType.getFieldNames.toIndexedSeq
     val fieldTypes = fieldNames.map(dataType.getFieldType)
     val fieldConverters = fieldTypes.map(ColumnType.converterToCassandra)
 
-    override def targetTypeTag = TypeTag.synchronized { implicitly[TypeTag[DriverUDTValue]] }
+    override def targetTypeTag = SparkReflectionLock.synchronized { implicitly[TypeTag[DriverUDTValue]] }
 
     override def convertPF = {
       case udtValue: UDTValue =>
@@ -70,11 +85,7 @@ object UserDefinedType {
           val fieldName = fieldNames(i)
           val fieldConverter = fieldConverters(i)
           val fieldValue = fieldConverter.convert(udtValue.getRaw(fieldName))
-          val fieldType = fieldTypes(i)
-          val serialized =
-            if (fieldValue != null) fieldType.serialize(fieldValue, protocolVersion)
-            else null
-          toSave.setBytesUnsafe(i, serialized)
+          toSave.set(i, fieldValue, CodecRegistryUtil.codecFor(fieldTypes(i), fieldValue))
         }
         toSave
     }
@@ -88,7 +99,7 @@ object UserDefinedType {
 
   }
 
-  def driverUDTValueConverter(dataType: DataType)(implicit protocolVersion: ProtocolVersion) =
+  def driverUDTValueConverter(dataType: DataType) =
     dataType match {
       case dt: UserType => new DriverUDTValueConverter(dt)
       case _            => throw new IllegalArgumentException("UserType expected.")

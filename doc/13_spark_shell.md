@@ -2,34 +2,23 @@
 
 ## Using the Spark Cassandra Connector with the Spark Shell 
 
-These instructions were last confirmed with C* 2.0.11, Spark 1.2.1 and Connector 1.2.1.
+These instructions were last confirmed with Cassandra 3.0.9, Spark 2.0.2 and Connector 2.0.1.
 
 For this guide, we assume an existing Cassandra deployment, running either locally or on a cluster, a local installation of Spark and an optional Spark cluster. For detail setup instructions see [setup spark-shell](13_1_setup_spark_shell.md)   
 
 To use the Spark Cassandra Connector from within the Spark Shell, we need to load the Connector and all its dependencies in the shell context. The easiest way to achieve that is to build an assembly (also known as _"fat jar"_) that packages all dependencies.
 
-### Building the Spark Cassandra Connector assembly 
-
-```bash
-git clone git@github.com:datastax/spark-cassandra-connector.git 
-cd spark-cassandra-connector
-git checkout tags/v1.2.1 ## Replace this with the version of the connector you would like to use
-./sbt/sbt assembly
-```
-
-Sanity check: 
-```bash
-ls spark-cassandra-connector/target/scala-2.10/
-## Should have a spark-cassandra-connector-assembly-*.jar here, copy full path to use as yourAssemblyJar below)
-```
-
 ### Starting the Spark Shell 
-If you don't include the master address below the spark shell will run in Local mode. 
+If you don't include the master address below the spark shell will run in Local mode. For the package be sure to pick the version
+of Scala that your Spark build uses (The "2.1X" portion of the package. If you aren't sure for Spark < 2.0 use 2.10).
+
+
+Find additional versions at [Spark Packages](http://spark-packages.org/package/datastax/spark-cassandra-connector)
   
 ```bash
 cd spark/install/dir
 #Include the --master if you want to run against a spark cluster and not local mode
-./bin/spark-shell [--master sparkMasterAddress] --jars yourAssemblyJar --conf spark.cassandra.connection.host=yourCassandraClusterIp
+./bin/spark-shell [--master sparkMasterAddress] --jars yourAssemblyJar --packages datastax:spark-cassandra-connector:2.0.1-s_2.11 --conf spark.cassandra.connection.host=yourCassandraClusterIp
 ```
 
 By default spark will log everything to the console and this may be a bit of an overload. To change this copy and modify the `log4j.properties` template file
@@ -85,12 +74,22 @@ Now, we obtain the IP Address that docker assigned to the container:
 CASSANDRA_CONTAINER_IP=$(docker inspect -f '{{ .NetworkSettings.IPAddress }}' $CASSANDRA_CONTAINER_ID)
 ```
 
+We could also run a named container using `--name` and query for IP using the name, e.g.
+
+```bash
+$ docker run --name cassie -d tobert/cassandra
+$ docker ps
+CONTAINER ID        IMAGE               COMMAND                  CREATED             STATUS              PORTS                                               NAMES
+3e9a39418f6a        tobert/cassandra    "/bin/cassandra-docke"   2 seconds ago       Up 2 seconds        7000/tcp, 7199/tcp, 9042/tcp, 9160/tcp, 61621/tcp   cassie
+$ CASSANDRA_CONTAINER_IP=$(docker inspect -f '{{ .NetworkSettings.IPAddress }}' cassie)
+```
+
 And we can start the spark shell using that running container:
 
 ```bash
 cd spark/install/dir
 #Include the --master if you want to run against a spark cluster and not local mode
-./bin/spark-shell [--master sparkMasterAddress] --jars yourAssemblyJar --conf spark.cassandra.connection.host=$IP
+./bin/spark-shell [--master sparkMasterAddress] --jars yourAssemblyJar --conf spark.cassandra.connection.host=$CASSANDRA_CONTAINER_IP
 ```
 
 [Next - DataFrames](14_data_frames.md) 

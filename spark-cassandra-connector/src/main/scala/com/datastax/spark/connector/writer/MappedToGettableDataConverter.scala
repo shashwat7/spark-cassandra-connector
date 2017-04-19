@@ -3,17 +3,27 @@ package com.datastax.spark.connector.writer
 import scala.language.existentials
 import scala.reflect.runtime.universe._
 import scala.util.control.NonFatal
-
-import com.datastax.spark.connector.util.{Symbols, ReflectionUtil}
-import com.datastax.spark.connector.{GettableByIndexData, TupleValue, UDTValue, ColumnRef}
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+import com.datastax.spark.connector.util.{ReflectionUtil, Symbols}
+import com.datastax.spark.connector.{ColumnRef, GettableByIndexData, TupleValue, UDTValue}
 import com.datastax.spark.connector.cql.StructDef
-import com.datastax.spark.connector.mapper.{DefaultColumnMapper, TupleColumnMapper, JavaBeanColumnMapper, ColumnMapper}
-import com.datastax.spark.connector.types.{TupleType, MapType, SetType, ListType, ColumnType, TypeConverter}
+import com.datastax.spark.connector.mapper._
+import com.datastax.spark.connector.types.{ColumnType, ListType, MapType, SetType, TupleType, TypeConverter}
+import com.datastax.spark.connector.util.Logging
 
-private[connector] object MappedToGettableDataConverter {
+private[connector] object MappedToGettableDataConverter extends Logging{
 
-  def apply[T : TypeTag : ColumnMapper]
-      (struct: StructDef, columnSelection: IndexedSeq[ColumnRef]): TypeConverter[struct.ValueRepr] =
+  /**
+    * When the Spark Cassandra Connector is running on a separate
+    * classloader it is possible that application classes will
+    * not be accessible. To avoid this scenario we can forcibly
+    * pass through the classloader from the application provided
+    * class to all converters created for children of this converter.
+    */
+  def apply[T : TypeTag : ColumnMapper](
+    struct: StructDef,
+    columnSelection: IndexedSeq[ColumnRef],
+    forceClassLoader: Option[ClassLoader] = None): TypeConverter[struct.ValueRepr] =
 
     new TypeConverter[struct.ValueRepr] {
 
@@ -34,7 +44,8 @@ private[connector] object MappedToGettableDataConverter {
         * and for everything else uses
         * [[com.datastax.spark.connector.mapper.DefaultColumnMapper DefaultColumnMapper]] */
       private def columnMapper[U: TypeTag]: ColumnMapper[U] = {
-        val tpe = TypeTag.synchronized(typeTag[U].tpe)
+        logDebug(s"Finding a UDT ColumnMapper for typeTag ${typeTag[U]}")
+        val tpe = SparkReflectionLock.synchronized(typeTag[U].tpe)
         if (ReflectionUtil.isScalaTuple(tpe))
           new TupleColumnMapper[U]
         else if (isJavaBean)
@@ -51,8 +62,10 @@ private[connector] object MappedToGettableDataConverter {
 
       /** Returns a converter for converting given column to appropriate type savable to Cassandra */
       private def converter[U : TypeTag](columnType: ColumnType[_]): TypeConverter[_ <: AnyRef] = {
-        TypeTag.synchronized {
+        SparkReflectionLock.synchronized {
           val scalaType = typeTag[U].tpe
+
+          logDebug(s"Getting converter for $columnType to $scalaType")
 
           (columnType, scalaType) match {
             // Collections need recursive call to get the converter for the collection elements
@@ -95,11 +108,18 @@ private[connector] object MappedToGettableDataConverter {
             case (t: StructDef, _) if scalaType <:< typeOf[GettableByIndexData] =>
               columnType.converterToCassandra
 
+            //Options
+            case (t: StructDef, TypeRef(_, _, List(argScalaType))) if scalaType <:< typeOf[Option[Any]] =>
+              type U2 = u2 forSome {type u2}
+              implicit val tt = ReflectionUtil.typeToTypeTag[U2](argScalaType)
+              implicit val cm: ColumnMapper[U2] = columnMapper[U2]
+              apply[U2](t, t.columnRefs, Some(childClassloader))
+
             // UDTs mapped to case classes and tuples mapped to Scala tuples.
             // ColumnMappers support mapping Scala tuples, so we don't need a special case for them.
             case (t: StructDef, _) =>
               implicit val cm: ColumnMapper[U] = columnMapper[U]
-              apply[U](t, t.columnRefs)
+              apply[U](t, t.columnRefs, Some(childClassloader))
 
             // Primitive types
             case _ =>
@@ -117,11 +137,25 @@ private[connector] object MappedToGettableDataConverter {
       }
 
       @transient
-      private val tpe = TypeTag.synchronized {
+      private val tpe = SparkReflectionLock.synchronized {
         typeTag[T].tpe
       }
 
-      private val cls = typeTag[T].mirror.runtimeClass(typeTag[T].tpe).asInstanceOf[Class[T]]
+      @transient
+      private val mirror = forceClassLoader match {
+        case Some(cl) => runtimeMirror(cl)
+        case None => typeTag[T].mirror
+      }
+
+      /**
+        * All converters descended from this converter should use the same classloader even if
+        * this class (MappedToGettableDataConverter) happens to be on a different classloader.
+        */
+      @transient
+      private val childClassloader = mirror.classLoader
+
+      logDebug(s"Finding a class for $tpe in ${mirror.classLoader}")
+      private val cls = mirror.runtimeClass(typeTag[T].tpe).asInstanceOf[Class[T]]
       private val typeName = tpe.toString
 
       val columnNames =
@@ -163,12 +197,20 @@ private[connector] object MappedToGettableDataConverter {
 
       override def targetTypeTag = typeTag[struct.ValueRepr]
 
+
       override def convertPF = {
         case obj if cls.isInstance(obj) =>
           val columnValues = extractor.extract(obj.asInstanceOf[T])
           for (i <- columnValues.indices)
             columnValues(i) = converters(i).convert(columnValues(i))
           struct.newInstance(columnValues: _*)
+        case Some(obj) if cls.isInstance(obj) =>
+          val columnValues = extractor.extract(obj.asInstanceOf[T])
+          for (i <- columnValues.indices)
+            columnValues(i) = converters(i).convert(columnValues(i))
+          struct.newInstance(columnValues: _*)
+        case None =>
+          null.asInstanceOf[struct.ValueRepr]
       }
     }
 }

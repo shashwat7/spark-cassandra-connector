@@ -2,14 +2,15 @@ package com.datastax.spark.connector.rdd.reader
 
 import java.lang.reflect.Method
 
+import com.datastax.spark.connector._
+import com.datastax.spark.connector.cql.StructDef
+import com.datastax.spark.connector.mapper.{ColumnMapper, DefaultColumnMapper, JavaBeanColumnMapper, TupleColumnMapper}
+import com.datastax.spark.connector.types._
+import com.datastax.spark.connector.util.{ReflectionUtil, Symbols}
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+
 import scala.language.existentials
 import scala.reflect.runtime.universe._
-
-import com.datastax.spark.connector.cql.StructDef
-import com.datastax.spark.connector.mapper.{JavaBeanColumnMapper, TupleColumnMapper, ColumnMapper, DefaultColumnMapper}
-import com.datastax.spark.connector.types.{TupleType, MapType, SetType, ListType, TypeConversionException, BigIntType, ColumnType, TypeConverter, UserDefinedType}
-import com.datastax.spark.connector.util.{Symbols, ReflectionUtil}
-import com.datastax.spark.connector._
 
 /** Converts a `GettableData` object representing a table row or a UDT value
   * to a tuple or a case class object using the given `ColumnMapper`.
@@ -38,7 +39,7 @@ private[connector] class GettableDataToMappedTypeConverter[T : TypeTag : ColumnM
   // we can't serialize the type tag, but we can at least serialize the type name,
   // therefore overriding targetTypeName and making it strict (non-lazy).
   override val targetTypeName: String =
-    TypeTag.synchronized(targetTypeTag.tpe.toString)
+    SparkReflectionLock.synchronized(targetTypeTag.tpe.toString)
 
   // must be serialized directly, for we can't recreate it on the deserialization side, as we don't have
   // the TypeTag anymore
@@ -61,7 +62,7 @@ private[connector] class GettableDataToMappedTypeConverter[T : TypeTag : ColumnM
     * and for everything else uses
     * [[com.datastax.spark.connector.mapper.DefaultColumnMapper DefaultColumnMapper]] */
   private def columnMapper[U : TypeTag]: ColumnMapper[U] = {
-    val tpe = TypeTag.synchronized(typeTag[U].tpe)
+    val tpe = SparkReflectionLock.synchronized(typeTag[U].tpe)
     if (tpe.typeSymbol.fullName startsWith "scala.Tuple")
       new TupleColumnMapper[U]
     else if (isJavaBean) 
@@ -80,7 +81,7 @@ private[connector] class GettableDataToMappedTypeConverter[T : TypeTag : ColumnM
     E.g. for a list type, we recursively call this method to get the converter for the
     list items and then we call `TypeConverter.forType` to get a proper converter for lists.
     */
-    val tpe = typeTag[U].tpe
+    val tpe = SparkReflectionLock.synchronized(typeTag[U].tpe)
     (columnType, tpe) match {
       case (argColumnType, TypeRef(_, Symbols.OptionSymbol, List(argScalaType))) =>
         val argConverter = converter(argColumnType, argScalaType)
@@ -157,7 +158,7 @@ private[connector] class GettableDataToMappedTypeConverter[T : TypeTag : ColumnM
       data: GettableData,
       converter: TypeConverter[_]): AnyRef = {
     val name = columnRef.columnName
-    val value = data.getRaw(columnRef.cqlValueName)
+    val value = data.getRawCql(columnRef.cqlValueName)
     checkNotNull(tryConvert(value, converter, name), name)
   }
 
@@ -171,7 +172,7 @@ private[connector] class GettableDataToMappedTypeConverter[T : TypeTag : ColumnM
 
   /** Converters for converting values passed to setters */
   private val setterParamConverters: Map[String, TypeConverter[_]] = {
-    val targetType = TypeTag.synchronized(typeTag[T].tpe)
+    val targetType = SparkReflectionLock.synchronized(typeTag[T].tpe)
     val setterParamTypes: Map[String, Type] =
       for ((s, _) <- columnMap.setters)
         yield (s, ReflectionUtil.methodParamTypes(targetType, s).head)

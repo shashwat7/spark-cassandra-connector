@@ -7,11 +7,13 @@ import scala.collection.JavaConversions._
 import scala.reflect.runtime.universe._
 
 import org.apache.commons.lang3.tuple.{Triple, Pair}
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema
 
-import com.datastax.driver.core.{TupleValue => DriverTupleValue, TupleType => DriverTupleType, ProtocolVersion, DataType}
-
+import com.datastax.driver.core.{TupleValue => DriverTupleValue, TupleType => DriverTupleType, DataType}
 import com.datastax.spark.connector.{TupleValue, ColumnName}
 import com.datastax.spark.connector.cql.{FieldDef, StructDef}
+import com.datastax.spark.connector.util.CodecRegistryUtil
 
 case class TupleFieldDef(index: Int, columnType: ColumnType[_]) extends FieldDef {
   override def columnName = index.toString
@@ -68,6 +70,8 @@ case class TupleType(componentTypes: TupleFieldDef*)
       override def targetTypeTag = TupleValue.TypeTag
 
       override def convertPF = {
+        case x: GenericRowWithSchema =>
+          newInstance(componentConverters)(x.toSeq: _*)
         case x: TupleValue =>
           newInstance(componentConverters)(x.columnValues: _*)
         case x: Product => // converts from Scala tuples
@@ -96,14 +100,14 @@ object TupleType {
 
   /** Converts connector's UDTValue to Cassandra Java Driver UDTValue.
     * Used when saving data to Cassandra.  */
-  class DriverTupleValueConverter(dataType: DriverTupleType)(implicit protocolVersion: ProtocolVersion)
+  class DriverTupleValueConverter(dataType: DriverTupleType)
     extends TypeConverter[DriverTupleValue] {
 
     val fieldTypes = dataType.getComponentTypes
     val fieldConverters = fieldTypes.map(ColumnType.converterToCassandra)
 
     override def targetTypeTag =
-      TypeTag.synchronized { typeTag[DriverTupleValue] }
+      SparkReflectionLock.synchronized { typeTag[DriverTupleValue] }
 
     override def convertPF = {
       case tupleValue: TupleValue =>
@@ -111,11 +115,7 @@ object TupleType {
         for (i <- 0 until fieldTypes.size) {
           val fieldConverter = fieldConverters(i)
           val fieldValue = fieldConverter.convert(tupleValue.getRaw(i))
-          val fieldType = fieldTypes(i)
-          val serialized =
-            if (fieldValue != null) fieldType.serialize(fieldValue, protocolVersion)
-            else null
-          toSave.setBytesUnsafe(i, serialized)
+          toSave.set(i, fieldValue,  CodecRegistryUtil.codecFor(fieldTypes(i), fieldValue))
         }
         toSave
     }
@@ -129,7 +129,7 @@ object TupleType {
 
   }
 
-  def driverTupleValueConverter(dataType: DataType)(implicit protocolVersion: ProtocolVersion): TypeConverter[_] = {
+  def driverTupleValueConverter(dataType: DataType): TypeConverter[_] = {
     dataType match {
       case dt: DriverTupleType => new DriverTupleValueConverter(dt)
       case _ => throw new IllegalArgumentException(s"${classOf[DriverTupleType]} expected.")

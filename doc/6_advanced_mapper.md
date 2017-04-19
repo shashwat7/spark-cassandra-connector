@@ -3,8 +3,8 @@
 
 While mapping rows to tuples and case classes work out-of-the box, 
 in some cases you might need more control over Cassandra-Scala mapping. 
-For example Java classes are likely to use the JavaBeans naming convention, where accessors are named 
-with `get`, `is` or `set` prefixes. 
+For example Java classes are likely to use the JavaBeans naming convention,
+where accessors are named with `get`, `is` or `set` prefixes. 
 
 To customize column-property mappings, 
 you need to put an appropriate `ColumnMapper[YourClass]` implicit object in scope. 
@@ -16,6 +16,7 @@ implementations are included.
 To work with Java classes, use `JavaBeanColumnMapper`. 
 Make sure your objects are `Serializable`, otherwise Spark won't be able to send them over the network.
 
+#### Example of using a new implicit Column Mapper to map a JavaBean Like Class
 ```scala
 import com.datastax.spark.connector.mapper.JavaBeanColumnMapper
 class WordCount extends Serializable { 
@@ -40,6 +41,7 @@ To save objects of class `WordCount`, you'll need to define getters.
 If for some reason you wish to associate a column of a different name than the property, 
 you may pass a column translation `Map` to a `DefaultColumnMapper` or `JavaBeanColumnMapper`:
 
+#### Example of Using a Custom DefaultColumnMapper
 ```scala
 case class WordCount(w: String, c: Int)
 
@@ -99,22 +101,24 @@ The following table specifies the relationship between a Cassandra column type a
 the type of needed `TypeConverter`.
 
 Cassandra column type | Object type to convert from / to
------------------------------------------------------------------
- `ascii`              | `java.lang.String`                                         
- `bigint`             | `java.lang.Long`                                       
- `blob`               | `java.nio.ByteBuffer` 
- `boolean`            | `java.lang.Boolean`              
- `counter`            | `java.lang.Long`                       
- `decimal`            | `java.math.BigDecimal` 
- `double`             | `java.lang.Double`    
- `float`              | `java.lang.Float`    
- `inet`               | `java.net.InetAddress` 
- `int`                | `java.lang.Integer`  
- `text`               | `java.lang.String` 
- `timestamp`          | `java.util.Date` 
- `uuid`               | `java.util.UUID` 
- `timeuuid`           | `java.util.UUID` 
- `varchar`            | `java.lang.String` 
+----------------------|------------------------------------------
+ `ascii`              | `java.lang.String`
+ `bigint`             | `java.lang.Long`
+ `blob`               | `java.nio.ByteBuffer`
+ `boolean`            | `java.lang.Boolean`
+ `counter`            | `java.lang.Long`
+ `decimal`            | `java.math.BigDecimal`
+ `double`             | `java.lang.Double`
+ `float`              | `java.lang.Float`
+ `inet`               | `java.net.InetAddress`
+ `int`                | `java.lang.Integer`
+ `smallint`           | `java.lang.Short`
+ `text`               | `java.lang.String`
+ `timestamp`          | `java.util.Date`
+ `timeuuid`           | `java.util.UUID`
+ `tinyint`            | `java.lang.Byte`
+ `uuid`               | `java.util.UUID`
+ `varchar`            | `java.lang.String`
  `varint`             | `java.math.BigInteger`
  user defined         | `com.datastax.spark.connector.UDTValue`
 
@@ -127,7 +131,7 @@ Cassandra UDT values, you must register a converter converting to connector's
 UDTValue class, not Java Driver's UDTValue. This is because many Java Driver's classes are not
 Serializable and would not be possible for such converter to be properly serialized/deserialized.  
 
-### Low-level control over mapping
+### Low-level control over mapping (Very Advanced Usage)
 The `ColumnMapper` API cannot be used to express every possible mapping, e.g., for classes that do not expose
 separate accessors for reading/writing every column. 
 

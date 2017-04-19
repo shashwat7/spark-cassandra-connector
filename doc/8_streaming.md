@@ -1,14 +1,8 @@
 # Documentation
 ## Spark Streaming with Cassandra
 Spark Streaming extends the core API to allow high-throughput, fault-tolerant stream processing of live data streams.
-Data can be ingested from many sources such as Akka, Kafka, Flume, Twitter, ZeroMQ, TCP sockets, etc. Results can be stored in Cassandra.
+Data can be ingested from many sources such as Akka, Kafka, Flume, ZeroMQ, TCP sockets, etc. Results can be stored in Cassandra.
 
-There is support for Akka with Spark Streaming, and a demo covering this usage. There is also a demo showing how to use
-Kafka with Spark Streaming, for which we also have exposed an Embedded Kafka and ZooKeeper server for quick user prototyping. 
-See the 'demos' module, 'streaming' package.
-
-Similar demos for Twitter and ZeroMQ with Spark Streaming are coming soon.
- 
 ### The Basic Idea
 
 #### Spark Streaming
@@ -113,4 +107,4 @@ For a more detailed description as well as tuning writes, see [Saving Data to Ca
 ### Find out more
 http://spark.apache.org/docs/latest/streaming-programming-guide.html
 
-[Next - Demos](9_demos.md)
+[Next - The spark-cassandra-connector-embedded Artifact](10_embedded.md)

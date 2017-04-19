@@ -1,17 +1,17 @@
 package com.datastax.spark.connector.embedded
 
-import java.io.{PrintWriter, StringWriter, StringReader, BufferedReader}
+import java.io._
 import java.net.URLClassLoader
 
+import org.apache.spark.SparkConf
+import org.apache.spark.repl.{Main, SparkILoop}
+
 import scala.collection.mutable.ArrayBuffer
-import scala.tools.nsc.interpreter.SparkILoop
+import scala.tools.nsc.GenericRunnerSettings
 
-trait SparkRepl {
+object SparkRepl {
 
-  def runInterpreter(master: String, input: String): String = {
-    System.setProperty("spark.master", master)
-    System.setProperty("spark.cassandra.connection.host", EmbeddedCassandra.getHost(0).getHostAddress)
-
+  def runInterpreter(input: String, conf: SparkConf): String = {
     val in = new BufferedReader(new StringReader(input + "\n"))
     val out = new StringWriter()
     val cl = getClass.getClassLoader
@@ -26,14 +26,15 @@ trait SparkRepl {
       case _ =>
     }
 
+    Main.conf.setAll(conf.getAll)
     val interp = new SparkILoop(Some(in), new PrintWriter(out))
-    org.apache.spark.repl.Main.interp = interp
+    Main.interp = interp
     val separator = System.getProperty("path.separator")
-    org.apache.spark.repl.Main.s.processArguments(List("-classpath", paths.mkString(separator)), true)
-    // 2.10 interp.process(Array("-classpath", paths.mkString(separator)))
-    org.apache.spark.repl.Main.interp = null
-    Option(org.apache.spark.repl.Main.sparkContext).map(_.stop())
-    // To avoid Akka rebinding to the same port, since it doesn't unbind immediately on shutdown
+    val settings = new GenericRunnerSettings(s => throw new RuntimeException(s"Scala options error: $s"))
+    settings.processArguments(List("-classpath", paths.mkString(separator)), true)
+    interp.process(settings) // Repl starts and goes in loop of R.E.P.L
+    Main.interp = null
+    Option(Main.sparkContext).foreach(_.stop())
     System.clearProperty("spark.driver.port")
     out.toString
   }

@@ -2,7 +2,7 @@ package com.datastax.spark.connector.rdd
 
 import java.io.IOException
 
-import com.datastax.driver.core.{Metadata, ConsistencyLevel, ProtocolVersion, Session}
+import com.datastax.driver.core.{Metadata, ConsistencyLevel}
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql.{TableDef, CassandraConnector, Schema}
 import com.datastax.spark.connector.rdd.reader._
@@ -31,32 +31,23 @@ trait CassandraTableRowReaderProvider[R] {
 
   protected def splitCount: Option[Int] = readConf.splitCount
 
-  protected def splitSize: Int = readConf.splitSizeInMB * 1024 * 1024
+  protected[connector] def splitSize: Long = readConf.splitSizeInMB * 1024L * 1024L
 
   protected def fetchSize: Int = readConf.fetchSizeInRows
 
   protected def consistencyLevel: ConsistencyLevel = readConf.consistencyLevel
 
-  /** RowReaderFactory and ClassTag should be exit provided from implicit parameters in the constructor
+  /** RowReaderFactory and ClassTag should be provided from implicit parameters in the constructor
     * of the class implementing this trait
     * @see CassandraTableScanRDD */
   protected val rowReaderFactory: RowReaderFactory[R]
 
   protected val classTag: ClassTag[R]
 
-  protected lazy val rowReader: RowReader[R] =
+  lazy val rowReader: RowReader[R] =
     rowReaderFactory.rowReader(tableDef, columnNames.selectFrom(tableDef))
 
-  lazy val tableDef: TableDef = {
-    Schema.fromCassandra(connector, Some(keyspaceName), Some(tableName)).tables.headOption match {
-      case Some(t) => t
-      case None =>
-        val metadata: Metadata = connector.withClusterDo(_.getMetadata)
-        val suggestions = NameTools.getSuggestions(metadata, keyspaceName, tableName)
-        val errorMessage = NameTools.getErrorString(keyspaceName, tableName, suggestions)
-        throw new IOException(errorMessage)
-    }
-  }
+  lazy val tableDef: TableDef = Schema.tableFromCassandra(connector, keyspaceName, tableName)
 
   protected def checkColumnsExistence(columns: Seq[ColumnRef]): Seq[ColumnRef] = {
     val allColumnNames = tableDef.columns.map(_.columnName).toSet
@@ -140,10 +131,6 @@ trait CassandraTableRowReaderProvider[R] {
       session =>
         session.execute("SELECT partitioner FROM system.local").one().getString(0)
     }
-
-  def protocolVersion(session: Session): ProtocolVersion = {
-    session.getCluster.getConfiguration.getProtocolOptions.getProtocolVersionEnum
-  }
 
   /** Checks for existence of keyspace and table.*/
   def verify() = {

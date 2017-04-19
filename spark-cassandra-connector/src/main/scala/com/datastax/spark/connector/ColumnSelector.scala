@@ -21,6 +21,12 @@ case object PartitionKeyColumns extends ColumnSelector {
     table.partitionKey.map(_.ref).toIndexedSeq
 }
 
+case object PrimaryKeyColumns extends ColumnSelector {
+  override def aliases: Map[String, String] = Map.empty.withDefault(x => x)
+  override def selectFrom(table: TableDef) =
+    table.primaryKey.map(_.ref)
+}
+
 case class SomeColumns(columns: ColumnRef*) extends ColumnSelector {
 
   override def aliases: Map[String, String] = columns.map {
@@ -28,7 +34,13 @@ case class SomeColumns(columns: ColumnRef*) extends ColumnSelector {
   }.toMap
 
   override def selectFrom(table: TableDef): IndexedSeq[ColumnRef] = {
-    val missing = table.missingColumns(columns).filterNot(_ == RowCountRef)
+    val missing = table.missingColumns {
+      columns flatMap {
+        case f: FunctionCallRef => f.requiredColumns //Replaces function calls by their required columns
+        case RowCountRef => Seq.empty //Filters RowCountRef from the column list
+        case other => Seq(other)
+      }
+    }
     if (missing.nonEmpty) throw new NoSuchElementException(
       s"Columns not found in table ${table.name}: ${missing.mkString(", ")}")
 

@@ -2,7 +2,7 @@ package com.datastax.spark.connector.rdd.partitioner
 
 import scala.collection.JavaConversions._
 
-import org.apache.spark.Logging
+import com.datastax.spark.connector.util.Logging
 
 import com.datastax.driver.core.exceptions.InvalidQueryException
 import com.datastax.spark.connector.cql.CassandraConnector
@@ -78,10 +78,14 @@ class DataSizeEstimates[V, T <: Token[V]](
 
   /** Estimates the total amount of data in a table assuming no replication. */
   lazy val dataSizeInBytes: Long = {
-    val byteCount = tokenRanges.map(_.totalSizeInBytes).sum
-    val normalizedCount = (byteCount / ringFraction).toLong
-    logDebug(s"Estimated size of $keyspaceName.$tableName is $normalizedCount bytes")
-    normalizedCount
+    val tokenRangeSizeInBytes = (totalDataSizeInBytes / ringFraction).toLong
+    logDebug(s"Estimated size of $keyspaceName.$tableName is $tokenRangeSizeInBytes bytes")
+    tokenRangeSizeInBytes
+  }
+
+  /** Estimates the total amount of data in a table without normalization assuming no replication. */
+  lazy val totalDataSizeInBytes: Long = {
+    tokenRanges.map(_.totalSizeInBytes).sum
   }
 }
 

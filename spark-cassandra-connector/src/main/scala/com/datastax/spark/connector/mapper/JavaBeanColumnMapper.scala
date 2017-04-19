@@ -2,8 +2,9 @@ package com.datastax.spark.connector.mapper
 
 import java.lang.reflect.Method
 
+import com.datastax.driver.core.ProtocolVersion
 import com.datastax.spark.connector.ColumnRef
-import com.datastax.spark.connector.cql.{TableDef, StructDef}
+import com.datastax.spark.connector.cql.TableDef
 
 import scala.reflect.ClassTag
 
@@ -14,7 +15,10 @@ class JavaBeanColumnMapper[T : ClassTag](columnNameOverride: Map[String, String]
 
   private def propertyName(accessorName: String) = {
     val AccessorRegex(_, strippedName) = accessorName
-    strippedName(0).toLower + strippedName.substring(1)
+    val fieldName = strippedName(0).toLower + strippedName.substring(1)
+    // For Java Beans, we need to figure out if there is
+    // an equivalent name on the annotation if it has one
+    annotationForFieldName(fieldName) getOrElse fieldName
   }
 
   override protected def isGetter(method: Method): Boolean =
@@ -52,7 +56,10 @@ class JavaBeanColumnMapper[T : ClassTag](columnNameOverride: Map[String, String]
   override protected def allowsNull = true
 
   // TODO: Implement
-  override def newTable(keyspaceName: String, tableName: String): TableDef = ???
+  override def newTable(
+    keyspaceName: String,
+    tableName: String,
+    protocolVersion: ProtocolVersion = ProtocolVersion.NEWEST_SUPPORTED): TableDef = ???
 }
 
 object JavaBeanColumnMapper {

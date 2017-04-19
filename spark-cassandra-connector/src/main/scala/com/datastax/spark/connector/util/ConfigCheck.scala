@@ -1,12 +1,13 @@
 package com.datastax.spark.connector.util
 
-import com.datastax.spark.connector.cql.{CassandraConnectionFactory, AuthConfFactory, CassandraConnectorConf}
-import com.datastax.spark.connector.rdd.ReadConf
-import com.datastax.spark.connector.writer.WriteConf
 import org.apache.commons.configuration.ConfigurationException
 import org.apache.commons.lang3.StringUtils
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.cassandra.{CassandraSourceRelation, CassandraSQLContext}
+import org.apache.spark.sql.cassandra.{CassandraSQLContextParams, CassandraSourceRelation}
+import com.datastax.spark.connector.cql.{AuthConfFactory, CassandraConnectionFactory, CassandraConnectorConf, SessionProxy}
+import com.datastax.spark.connector.rdd.ReadConf
+import com.datastax.spark.connector.types.ColumnTypeConf
+import com.datastax.spark.connector.writer.WriteConf
 
 /**
  * Helper class to throw exceptions if there are environment variables in the spark.cassandra
@@ -19,19 +20,23 @@ object ConfigCheck {
 
   /** Set of valid static properties hardcoded in the connector.
     * Custom CassandraConnectionFactory and AuthConf properties are not listed here. */
-  val validStaticProperties =
+  val validStaticProperties: Set[ConfigParameter[_]] =
     WriteConf.Properties ++
     ReadConf.Properties ++
     CassandraConnectorConf.Properties ++
     AuthConfFactory.Properties ++
     CassandraConnectionFactory.Properties ++
-    CassandraSQLContext.Properties ++
-    CassandraSourceRelation.Properties
+    CassandraSQLContextParams.Properties ++
+    CassandraSourceRelation.Properties ++
+    ColumnTypeConf.Properties
+
+  val validStaticPropertyNames = validStaticProperties.map(_.name)
 
 
   /**
    * Checks the SparkConf Object for any unknown spark.cassandra.* properties and throws an exception
    * with suggestions if an unknown property is found.
+   *
    * @param conf SparkConf object to check
    */
   def checkConfig(conf: SparkConf): Unit = {
@@ -48,7 +53,7 @@ object ConfigCheck {
   }
 
   def unknownProperties(conf: SparkConf, extraProps: Set[String] = Set.empty): Seq[String] = {
-    val validProps = validStaticProperties ++ extraProps
+    val validProps = validStaticPropertyNames ++ extraProps
     val scEnv = for ((key, value) <- conf.getAll if key.startsWith(Prefix)) yield key
     for (key <- scEnv if !validProps.contains(key)) yield key
   }
@@ -65,7 +70,7 @@ object ConfigCheck {
    * Fuzziness is determined by MatchThreshold
    */
   def suggestedProperties(unknownProp: String, extraProps: Set[String] = Set.empty): Seq[String] = {
-    val validProps = validStaticProperties ++ extraProps
+    val validProps = validStaticPropertyNames ++ extraProps
     val unknownFragments = unknownProp.stripPrefix(Prefix).split("\\.")
     validProps.toSeq.filter { knownProp =>
       val knownFragments = knownProp.stripPrefix(Prefix).split("\\.")
@@ -80,6 +85,7 @@ object ConfigCheck {
 
   /**
    * Exception to be thrown when unknown properties are found in the SparkConf
+ *
    * @param unknownProps Properties that have no mapping to known Spark Cassandra Connector properties
    * @param suggestionMap A map possibly containing suggestions for each of of the unknown properties
    */

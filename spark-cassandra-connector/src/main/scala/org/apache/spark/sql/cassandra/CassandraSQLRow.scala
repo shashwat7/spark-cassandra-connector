@@ -1,20 +1,22 @@
 package org.apache.spark.sql.cassandra
 
+import java.math.BigInteger
+import java.net.InetAddress
 import java.sql.Timestamp
-import java.util.Date
+import java.util.{Date, UUID}
 
-import org.apache.spark.sql.types.UTF8String
+import com.datastax.driver.core.Row
+import com.datastax.spark.connector.rdd.reader.{RowReader, ThisRowReaderAsFactory}
+import com.datastax.spark.connector.types.{ColumnType, TypeConverter}
+import com.datastax.spark.connector.{CassandraRow, CassandraRowMetadata, GettableData, TupleValue, UDTValue}
+import org.apache.spark.sql.types.Decimal
+import org.apache.spark.sql.{Row => SparkRow}
+import org.apache.spark.unsafe.types.UTF8String
 
-import com.datastax.driver.core.{Row, ProtocolVersion}
-import com.datastax.spark.connector.GettableData
-import com.datastax.spark.connector.rdd.reader.{ThisRowReaderAsFactory, RowReader}
-import com.datastax.spark.connector.types.TypeConverter
-import org.apache.spark.sql.catalyst.expressions.{Row => SparkRow}
-
-final class CassandraSQLRow(val columnNames: IndexedSeq[String], val columnValues: IndexedSeq[AnyRef])
+final class CassandraSQLRow(val metaData: CassandraRowMetadata, val columnValues: IndexedSeq[AnyRef])
   extends GettableData with SparkRow with Serializable {
 
-  protected def fieldNames = columnNames
+  protected def fieldNames = metaData
 
   private[spark] def this() = this(null, null) // required by Kryo for deserialization :(
 
@@ -35,32 +37,55 @@ final class CassandraSQLRow(val columnNames: IndexedSeq[String], val columnValue
   override def getShort(i: Int) = get[Short](i)
   override def getInt(i: Int) = get[Int](i)
   override def getString(i: Int) = get[String](i)
+  override def get(i: Int) = get[Any](i)
+
+  override def isNullAt(i: Int): Boolean = super[GettableData].isNullAt(i)
+
   override def toSeq: Seq[Any] = columnValues
 }
 
 
 object CassandraSQLRow {
 
-  def fromJavaDriverRow(row: Row, columnNames: Array[String])(implicit protocolVersion: ProtocolVersion): CassandraSQLRow = {
-    val data = new Array[Object](columnNames.length)
-    for (i <- columnNames.indices) {
-      data(i) = GettableData.get(row, i)
-      data(i) match {
-        case date: Date => data.update(i, new Timestamp(date.getTime))
-        case str: String => data.update(i, UTF8String(str))
-        case set: Set[_] => data.update(i, set.toSeq)
-        case _ =>
-      }
-    }
-    new CassandraSQLRow(columnNames, data)
+  def fromJavaDriverRow(row: Row, metaData:CassandraRowMetadata): CassandraSQLRow = {
+    val data = CassandraRow.dataFromJavaDriverRow(row, metaData)
+    new CassandraSQLRow(metaData, data.map(toSparkSqlType))
   }
 
   implicit object CassandraSQLRowReader extends RowReader[CassandraSQLRow] with ThisRowReaderAsFactory[CassandraSQLRow] {
 
-    override def read(row: Row, columnNames: Array[String])(implicit protocolVersion: ProtocolVersion): CassandraSQLRow =
-      fromJavaDriverRow(row, columnNames)
+    override def read(row: Row, metaData:CassandraRowMetadata): CassandraSQLRow =
+      fromJavaDriverRow(row, metaData)
 
     override def neededColumns = None
     override def targetClass = classOf[CassandraSQLRow]
   }
+
+  private lazy val customCatalystDataTypeConverter: PartialFunction[Any, AnyRef] = {
+    ColumnType.customDriverConverter
+      .flatMap(clazz => Some(clazz.catalystDataTypeConverter))
+      .getOrElse(PartialFunction.empty)
+  }
+
+  private def toSparkSqlType(value: Any): AnyRef = {
+    val sparkSqlType: PartialFunction[Any, AnyRef] = customCatalystDataTypeConverter orElse {
+      case date: Date => new Timestamp(date.getTime)
+      case localDate: org.joda.time.LocalDate =>
+        new java.sql.Date(localDate.toDateTimeAtStartOfDay().getMillis)
+      case str: String => UTF8String.fromString(str)
+      case bigInteger: BigInteger => Decimal(bigInteger.toString)
+      case inetAddress: InetAddress => UTF8String.fromString(inetAddress.getHostAddress)
+      case uuid: UUID => UTF8String.fromString(uuid.toString)
+      case set: Set[_] => set.map(toSparkSqlType).toSeq
+      case list: List[_] => list.map(toSparkSqlType)
+      case map: Map[_, _] => map map { case(k, v) => (toSparkSqlType(k), toSparkSqlType(v))}
+      case udt: UDTValue => UDTValue(udt.columnNames, udt.columnValues.map(toSparkSqlType))
+      case tupleValue: TupleValue => TupleValue(tupleValue.values.map(toSparkSqlType): _*)
+      case _ => value.asInstanceOf[AnyRef]
+    }
+    sparkSqlType(value)
+  }
+
+  val empty = new CassandraSQLRow(null, IndexedSeq.empty)
 }
+

@@ -4,21 +4,15 @@ import java.io.File
 
 import com.datastax.spark.connector.embedded.SparkTemplate
 import org.apache.commons.io.FileUtils
-import org.apache.spark.{SparkEnv, SparkConf}
+import org.apache.spark.{TaskContext, SparkEnv, SparkConf}
 import org.scalatest.{FlatSpec, Matchers}
 
 class CassandraConnectorSourceSpec extends FlatSpec with Matchers with SparkTemplate {
 
-  def prepareConf = {
-    val conf = new SparkConf(loadDefaults = false)
-    conf.setMaster("local[*]")
-    conf.setAppName("test")
-    conf
-  }
+  private def prepareConf = SparkTemplate.defaultConf.setMaster("local[*]")
 
   "CassandraConnectorSource" should "be initialized when it was specified in metrics properties" in {
     val className = classOf[CassandraConnectorSource].getName
-    System.err.println(className)
     val metricsPropertiesContent =
       s"""
          |*.source.cassandra-connector.class=$className
@@ -32,12 +26,12 @@ class CassandraConnectorSourceSpec extends FlatSpec with Matchers with SparkTemp
     conf.set("spark.metrics.conf", metricsPropertiesFile.getAbsolutePath)
     useSparkConf(conf)
     try {
-      CassandraConnectorSource.instance.isDefined shouldBe true
+      sc.runJob(sc.makeRDD(1 to 1), (tc: TaskContext, it: Iterator[Int]) => {
+        MetricsUpdater.getSource(tc).toArray.length
+      }).head shouldBe 1
     } finally {
       sc.stop()
     }
-
-    CassandraConnectorSource.instance.isDefined shouldBe false
   }
 
   it should "not be initialized when it wasn't specified in metrics properties" in {
@@ -54,26 +48,11 @@ class CassandraConnectorSourceSpec extends FlatSpec with Matchers with SparkTemp
 
     useSparkConf(conf)
     try {
-      CassandraConnectorSource.instance.isDefined shouldBe false
+      sc.runJob(sc.makeRDD(1 to 1), (tc: TaskContext, it: Iterator[Int]) => {
+        MetricsUpdater.getSource(tc).toArray.length
+      }).head shouldBe 0
     } finally {
       sc.stop()
-    }
-  }
-
-  it should "be able to create a new instance in the executor environment only once" in {
-    val env = SparkEnv.get
-    if (env != null && !env.isStopped) {
-      sc.stop()
-    }
-    SparkEnv.set(null)
-    CassandraConnectorSource.reset()
-
-    CassandraConnectorSource.instance shouldBe None
-    val ccs = new CassandraConnectorSource
-    CassandraConnectorSource.instance should not be ccs
-
-    a [AssertionError] should be thrownBy {
-      new CassandraConnectorSource
     }
   }
 

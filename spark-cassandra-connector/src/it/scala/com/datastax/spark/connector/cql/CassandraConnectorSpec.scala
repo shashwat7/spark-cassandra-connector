@@ -1,21 +1,20 @@
 package com.datastax.spark.connector.cql
 
-import com.datastax.spark.connector.embedded.SparkTemplate._
-import org.apache.spark.SparkConf
-
-import com.datastax.driver.core.ProtocolOptions
-import com.datastax.spark.connector.SparkCassandraITFlatSpecBase
+import com.datastax.driver.core.{HostDistance, ProtocolOptions}
+import com.datastax.spark.connector.{SparkCassandraITFlatSpecBase, _}
 import com.datastax.spark.connector.embedded._
+import org.scalatest.BeforeAndAfterEach
 
 case class KeyValue(key: Int, group: Long, value: String)
 case class KeyValueWithConversion(key: String, group: Int, value: Long)
 
-class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
+class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase with BeforeAndAfterEach{
+  useCassandraConfig(Seq(YamlTransformations.Default))
+  useSparkConf(defaultConf)
 
-  useCassandraConfig(Seq("cassandra-default.yaml.template"))
-  val conn = CassandraConnector(defaultConf)
+  override val conn = CassandraConnector(defaultConf)
 
-  val createKeyspaceCql = "CREATE KEYSPACE IF NOT EXISTS test WITH REPLICATION = { 'class': 'SimpleStrategy', 'replication_factor': 1 }"
+  val createKeyspaceCql = keyspaceCql(ks)
 
   "A CassandraConnector" should "connect to Cassandra with native protocol" in {
     conn.withSessionDo { session =>
@@ -31,13 +30,28 @@ class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
     }
   }
 
+  it should "have the default max hosts in pooling options" in {
+    val poolingConf = conn.withClusterDo(_.getConfiguration.getPoolingOptions)
+    poolingConf.getMaxConnectionsPerHost(HostDistance.LOCAL) should be (1)
+    poolingConf.getMaxConnectionsPerHost(HostDistance.REMOTE) should be (1)
+  }
+
+  it should "have larger max hosts if set" in {
+    val maxCon = CassandraConnector(
+      defaultConf.set(CassandraConnectorConf.MaxConnectionsPerExecutorParam.name, "5"))
+
+    val poolingConf = maxCon.withClusterDo(_.getConfiguration.getPoolingOptions)
+    poolingConf.getMaxConnectionsPerHost(HostDistance.LOCAL) should be (5)
+    poolingConf.getMaxConnectionsPerHost(HostDistance.REMOTE) should be (5)
+  }
+
   it should "run queries" in {
     conn.withSessionDo { session =>
       session.execute(createKeyspaceCql)
-      session.execute("DROP TABLE IF EXISTS test.simple_query")
-      session.execute("CREATE TABLE test.simple_query (key INT PRIMARY KEY, value TEXT)")
-      session.execute("INSERT INTO test.simple_query(key, value) VALUES (1, 'value')")
-      val result = session.execute("SELECT * FROM test.simple_query WHERE key = ?", 1.asInstanceOf[AnyRef])
+      session.execute(s"DROP TABLE IF EXISTS $ks.simple_query")
+      session.execute(s"CREATE TABLE $ks.simple_query (key INT PRIMARY KEY, value TEXT)")
+      session.execute(s"INSERT INTO $ks.simple_query(key, value) VALUES (1, 'value')")
+      val result = session.execute(s"SELECT * FROM $ks.simple_query WHERE key = ?", 1.asInstanceOf[AnyRef])
       assert(result.one().getString("value") === "value")
     }
   }
@@ -45,17 +59,20 @@ class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
   it should "cache PreparedStatements" in {
     conn.withSessionDo { session =>
       session.execute(createKeyspaceCql)
-      session.execute("DROP TABLE IF EXISTS test.pstmt")
-      session.execute("CREATE TABLE test.pstmt (key INT PRIMARY KEY, value TEXT)")
-      val stmt1 = session.prepare("INSERT INTO test.pstmt (key, value) VALUES (?, ?)")
-      val stmt2 = session.prepare("INSERT INTO test.pstmt (key, value) VALUES (?, ?)")
+      session.execute(s"DROP TABLE IF EXISTS $ks.pstmt")
+      session.execute(s"CREATE TABLE $ks.pstmt (key INT PRIMARY KEY, value TEXT)")
+      val stmt1 = session.prepare(s"INSERT INTO $ks.pstmt (key, value) VALUES (?, ?)")
+      val stmt2 = session.prepare(s"INSERT INTO $ks.pstmt (key, value) VALUES (?, ?)")
       assert(stmt1 eq stmt2)
     }
   }
 
   it should "disconnect from the cluster after use" in {
     val cluster = conn.withClusterDo { cluster => cluster }
-    Thread.sleep(CassandraConnector.keepAliveMillis * 2)
+    Thread.sleep(
+      sc.getConf.getInt(
+        "spark.cassandra.connection.keep_alive_ms",
+        CassandraConnectorConf.KeepAliveMillisParam.default) * 2)
     assert(cluster.isClosed === true)
   }
 
@@ -77,7 +94,7 @@ class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
   }
 
   it should "share internal Cluster object between multiple logical sessions created by different connectors to the same cluster" in {
-    val conn2 = CassandraConnector(defaultConf)
+    val conn2 = CassandraConnector(sc.getConf)
     val session1 = conn.openSession()
     val threadCount1 = Thread.activeCount()
     val session2 = conn2.openSession()
@@ -91,10 +108,31 @@ class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
     session2.isClosed shouldEqual true
   }
 
+  it should "cache session objects for reuse" in {
+    CassandraConnector(sc.getConf).withSessionDo(x => {})
+    CassandraConnector(sc.getConf).withSessionDo(x => {})
+    val sessionCache = CassandraConnector.sessionCache
+    sessionCache.contains(CassandraConnectorConf(sc.getConf)) should be (true)
+    sessionCache.cache.size should be (1)
+  }
+
+  it should "not make multiple clusters when writing multiple RDDs" in {
+    CassandraConnector(sc.getConf).withSessionDo { session =>
+      session.execute(createKeyspaceCql)
+      session.execute(s"CREATE TABLE IF NOT EXISTS $ks.pair (x int, y int, PRIMARY KEY (x))")
+    }
+    for (trial <- 1 to 3) {
+      val rdd = sc.parallelize(1 to 100).map(x => (x, x)).saveToCassandra(ks, "pair")
+    }
+
+    val sessionCache = CassandraConnector.sessionCache
+    sessionCache.contains(CassandraConnectorConf(sc.getConf)) should be(true)
+    sessionCache.cache.size should be(1)
+  }
+    
+
   it should "be configurable from SparkConf" in {
-    val host = EmbeddedCassandra.getHost(0).getHostAddress
-    val conf = defaultConf
-    conf.set(CassandraConnectorConf.CassandraConnectionHostProperty, host)
+    val conf = sc.getConf
 
     // would throw exception if connection unsuccessful
     val conn2 = CassandraConnector(conf)
@@ -105,8 +143,8 @@ class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
     val goodHost = EmbeddedCassandra.getHost(0).getHostAddress
     val invalidHost = "192.168.254.254"
     // let's connect to two addresses, of which the first one is deliberately invalid
-    val conf = defaultConf
-    conf.set(CassandraConnectorConf.CassandraConnectionHostProperty, invalidHost + "," + goodHost)
+    val conf = sc.getConf
+    conf.set(CassandraConnectorConf.ConnectionHostParam.name, invalidHost + "," + goodHost)
 
     // would throw exception if connection unsuccessful
     val conn2 = CassandraConnector(conf)
@@ -114,10 +152,8 @@ class CassandraConnectorSpec extends SparkCassandraITFlatSpecBase {
   }
 
   it should "use compression when configured" in {
-    val host = EmbeddedCassandra.getHost(0).getHostAddress
-    val conf = new SparkConf(loadDefaults = false)
-      .set(CassandraConnectorConf.CassandraConnectionHostProperty, host)
-      .set(CassandraConnectorConf.CassandraConnectionCompressionProperty, "SNAPPY")
+    val conf = sc.getConf
+      .set(CassandraConnectorConf.CompressionParam.name, "SNAPPY")
 
     val conn = CassandraConnector(conf)
     conn.withSessionDo { session ⇒

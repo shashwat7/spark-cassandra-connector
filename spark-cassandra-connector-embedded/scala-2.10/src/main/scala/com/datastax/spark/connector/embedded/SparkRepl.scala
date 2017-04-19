@@ -1,15 +1,16 @@
 package com.datastax.spark.connector.embedded
 
-import java.io.{PrintWriter, StringWriter, StringReader, BufferedReader}
+import java.io._
 import java.net.URLClassLoader
 
 import scala.collection.mutable.ArrayBuffer
+
+import org.apache.spark.SparkConf
 import org.apache.spark.repl.SparkILoop
 
-trait SparkRepl {
+object SparkRepl {
 
-  def runInterpreter(master: String, input: String): String = {
-    System.setProperty("spark.cassandra.connection.host", EmbeddedCassandra.getHost(0).getHostAddress)
+  def runInterpreter(input: String, conf: SparkConf): String = {
     val in = new BufferedReader(new StringReader(input + "\n"))
     val out = new StringWriter()
     val cl = getClass.getClassLoader
@@ -24,7 +25,8 @@ trait SparkRepl {
       case _ =>
     }
 
-    val interp = new SparkILoop(in, new PrintWriter(out), master)
+    sys.props ++= conf.getAll
+    val interp = new SparkILoop(in, new PrintWriter(out))
     org.apache.spark.repl.Main.interp = interp
     val separator = System.getProperty("path.separator")
     interp.process(Array("-classpath", paths.mkString(separator)))

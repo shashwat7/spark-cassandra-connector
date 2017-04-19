@@ -1,6 +1,7 @@
 package com.datastax.spark.connector.cql
 
 import java.util.concurrent.{ThreadFactory, TimeUnit, Executors}
+import java.util.ConcurrentModificationException
 
 import scala.annotation.tailrec
 import scala.collection.concurrent.TrieMap
@@ -16,16 +17,16 @@ final class RefCountedCache[K, V](create: K => V,
                                   destroy: V => Any,
                                   keys: (K, V) => Set[K] = (_: K, _: V) => Set.empty[K]) {
 
-  private case class ReleaseTask(value: V, count: Int, scheduledTime: Long) extends Runnable {
+  private[cql] case class ReleaseTask(value: V, count: Int, scheduledTime: Long) extends Runnable {
     def run() {
       releaseImmediately(value, count)
     }
   }
 
-  private val refCounter = new RefCountMap[V]
-  private val cache = new TrieMap[K, V]
-  private val valuesToKeys = new TrieMap[V, Set[K]]
-  private val deferredReleases = new TrieMap[V, ReleaseTask]
+  private[cql] val refCounter = new RefCountMap[V]
+  private[cql] val cache = new TrieMap[K, V]
+  private[cql] val valuesToKeys = new TrieMap[V, Set[K]]
+  private[cql] val deferredReleases = new TrieMap[V, ReleaseTask]
 
   private def createNewValueAndKeys(key: K): (V, Set[K]) = {
     val value = create(key)
@@ -53,6 +54,18 @@ final class RefCountedCache[K, V](create: K => V,
         else
           acquire(key)
       case None =>
+        syncAcquire(key)
+    }
+  }
+
+  private[this] def syncAcquire(key: K): V = synchronized {
+    cache.get(key) match {
+      case Some(value) =>
+        if (refCounter.acquireIfNonZero(value) > 0)
+          value
+        else
+          acquire(key)
+      case None =>
         val (value, keySet) = createNewValueAndKeys(key)
         refCounter.acquire(value)
         cache.putIfAbsent(key, value) match {
@@ -61,12 +74,7 @@ final class RefCountedCache[K, V](create: K => V,
             valuesToKeys.put(value, keySet)
             value
           case Some(otherValue) =>
-            destroy(value)
-            refCounter.release(value)
-            if (refCounter.acquireIfNonZero(otherValue) > 0)
-              otherValue
-            else
-              acquire(key)
+            throw new ConcurrentModificationException("It shouldn't reach here as it is synchronized")
         }
     }
   }

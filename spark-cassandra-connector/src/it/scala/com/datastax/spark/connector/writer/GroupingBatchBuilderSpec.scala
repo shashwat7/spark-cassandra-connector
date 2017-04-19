@@ -3,37 +3,41 @@ package com.datastax.spark.connector.writer
 import com.datastax.spark.connector.embedded.SparkTemplate._
 
 import scala.collection.JavaConversions._
-import scala.collection.immutable.Map
 import scala.util.Random
-
 import com.datastax.driver.core.BatchStatement.Type
 import com.datastax.driver.core.{BatchStatement, BoundStatement, ConsistencyLevel, Session}
 import com.datastax.spark.connector.cql.{CassandraConnector, Schema}
-import com.datastax.spark.connector.embedded.EmbeddedCassandra
+import com.datastax.spark.connector.embedded.YamlTransformations
 import com.datastax.spark.connector.{BatchSize, BytesInBatch, RowsInBatch, SparkCassandraITFlatSpecBase}
 
 class GroupingBatchBuilderSpec extends SparkCassandraITFlatSpecBase {
-
-  useCassandraConfig(Seq("cassandra-default.yaml.template"))
-  val conn = CassandraConnector(defaultConf)
-
-  private val ks = "GroupingBatchBuilder"
+  useCassandraConfig(Seq(YamlTransformations.Default))
+  override val conn = CassandraConnector(defaultConf)
 
   conn.withSessionDo { session =>
-    session.execute(s"""CREATE KEYSPACE IF NOT EXISTS "$ks" WITH REPLICATION = { 'class': 'SimpleStrategy', 'replication_factor': 1 }""")
-    session.execute(s"""CREATE TABLE IF NOT EXISTS "$ks".tab (id INT PRIMARY KEY, value TEXT)""")
+    createKeyspace(session)
+    session.execute(s"""CREATE TABLE $ks.tab (id INT PRIMARY KEY, value TEXT)""")
   }
 
-  val protocolVersion = conn.withClusterDo(_.getConfiguration.getProtocolOptions.getProtocolVersionEnum)
   val schema = Schema.fromCassandra(conn, Some(ks), Some("tab"))
   val rowWriter = RowWriterFactory.defaultRowWriterFactory[(Int, String)].rowWriter(schema.tables.head, IndexedSeq("id", "value"))
   val rkg = new RoutingKeyGenerator(schema.tables.head, Seq("id", "value"))
 
   def makeBatchBuilder(session: Session): (BoundStatement => Any, BatchSize, Int, Iterator[(Int, String)]) => GroupingBatchBuilder[(Int, String)] = {
-    val stmt = session.prepare(s"""INSERT INTO "$ks".tab (id, value) VALUES (:id, :value)""")
-    val boundStmtBuilder = new BoundStatementBuilder(rowWriter, stmt, protocolVersion)
+    val protocolVersion = session.getCluster.getConfiguration.getProtocolOptions.getProtocolVersion
+    val stmt = session.prepare( s"""INSERT INTO $ks.tab (id, value) VALUES (:id, :value)""")
+    val boundStmtBuilder = new BoundStatementBuilder(
+      rowWriter,
+      stmt,
+      protocolVersion = protocolVersion)
     val batchStmtBuilder = new BatchStatementBuilder(Type.UNLOGGED, rkg, ConsistencyLevel.LOCAL_ONE)
-    new GroupingBatchBuilder[(Int, String)](boundStmtBuilder, batchStmtBuilder, _: BoundStatement => Any, _: BatchSize, _: Int, _: Iterator[(Int, String)])
+    new GroupingBatchBuilder[(Int, String)](
+      boundStmtBuilder,
+      batchStmtBuilder,
+      _: BoundStatement => Any,
+      _: BatchSize,
+      _: Int,
+      _: Iterator[(Int, String)])
   }
 
   def staticBatchKeyGen(bs: BoundStatement): Int = 0

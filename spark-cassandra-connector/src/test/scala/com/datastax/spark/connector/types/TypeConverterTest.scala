@@ -4,14 +4,17 @@ import java.math.BigInteger
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
-import java.util.{GregorianCalendar, Date, UUID}
+import java.util.{Date, GregorianCalendar, UUID}
+
+import scala.collection.immutable.{TreeMap, TreeSet}
+import scala.reflect.runtime.universe._
+
 import org.apache.commons.lang3.SerializationUtils
 import org.joda.time.DateTime
 import org.junit.Assert._
 import org.junit.Test
 
-import scala.collection.immutable.{TreeMap, TreeSet}
-import scala.reflect.runtime.universe._
+import com.datastax.driver.core.LocalDate
 import com.datastax.spark.connector.testkit._
 
 class TypeConverterTest {
@@ -130,9 +133,33 @@ class TypeConverterTest {
   def testDate() {
     val c = TypeConverter.forType[Date]
     val dateStr = "2014-04-23 11:21:32+0100"
-    val dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ssZ")
-    val date = dateFormat.parse(dateStr)
+    val dayOnlyStr = "2014-04-23"
+    val localDate = LocalDate.fromYearMonthDay(2014, 4, 23)
+    val jodaLocalDate = new org.joda.time.LocalDate(2014, 4, 23)
+
+    val date = new SimpleDateFormat("yyyy-MM-dd HH:mm:ssZ").parse(dateStr)
+    val dateDayOnly = new SimpleDateFormat("yyyy-MM-dd").parse(dayOnlyStr)
+
+    assertEquals(dateDayOnly, c.convert(localDate))
+    assertEquals(dateDayOnly, c.convert(jodaLocalDate))
     assertEquals(date, c.convert(dateStr))
+  }
+
+  @Test
+  def testSqlDate(): Unit = {
+    val c = TypeConverter.forType[java.sql.Date]
+
+    val targetDate = java.sql.Date.valueOf("2014-04-23")
+
+    val localDate = LocalDate.fromYearMonthDay(2014,4,23)
+    val jodaLocalDate = new org.joda.time.LocalDate(2014, 4, 23)
+
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val utilDate = dateFormat.parse("2014-04-23")
+
+    assertEquals(targetDate, c.convert(localDate))
+    assertEquals(targetDate, c.convert(jodaLocalDate))
+    assertEquals(targetDate, c.convert(utilDate))
   }
 
   @Test
@@ -189,10 +216,43 @@ class TypeConverterTest {
   }
 
   @Test
+  def testLocalDate(): Unit = {
+    val c = TypeConverter.forType[LocalDate]
+    val testDate = LocalDate.fromYearMonthDay(1985, 8, 3)
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val date = dateFormat.parse("1985-08-03")
+    assertEquals(testDate, c.convert("1985-08-03"))
+    assertEquals(testDate, c.convert(5693))
+    assertEquals(testDate, c.convert(date))
+    assertEquals(testDate, c.convert(java.sql.Date.valueOf("1985-08-03")))
+    assertEquals(testDate, c.convert(new DateTime(date)))
+    assertEquals(testDate, c.convert(new org.joda.time.LocalDate(1985, 8, 3)))
+  }
+
+  @Test
+  def testTimeType(): Unit = {
+    val c = TypeConverter.TimeTypeConverter
+    val targetTime = 1482000000L
+    val date = new Date(1482)
+    assertEquals(targetTime, c.convert(targetTime))
+    assertEquals(targetTime, c.convert(date))
+  }
+
+  @Test
   def testOption() {
     val c = TypeConverter.forType[Option[String]]
     assertEquals(None, c.convert(null))
+    assertEquals(None, c.convert(None))
     assertEquals(Some("not-null"), c.convert("not-null"))
+  }
+
+  @Test
+  def testCassandraOption() {
+    val c = TypeConverter.forType[CassandraOption[String]]
+    val unset = CassandraOption.Unset
+    val set = CassandraOption.Value("not-null")
+    assertEquals(unset, c.convert(null))
+    assertEquals(set, c.convert("not-null"))
   }
 
   @Test
@@ -339,6 +399,14 @@ class TypeConverterTest {
     assertEquals(null, c.convert(null))
   }
 
+  @Test
+  def testCassandraOptionToNull() {
+    val c = new TypeConverter.OptionToNullConverter(TypeConverter.IntConverter)
+    assertEquals(Unset, c.convert(CassandraOption.Unset))
+    assertEquals(null, c.convert(CassandraOption.Null))
+    assertEquals(1.asInstanceOf[AnyRef], c.convert(CassandraOption.Value(1)))
+  }
+
   @Test(expected = classOf[IllegalArgumentException])
   def testUnsupportedType() {
     TypeConverter.forType[TypeConverterTest]
@@ -413,29 +481,38 @@ class TypeConverterTest {
   def testRegisterCustomConverter() {
     val converter = new TypeConverter[EMail] {
       def targetTypeTag = typeTag[EMail]
+
       def convertPF = { case x: String => EMail(x) }
     }
     TypeConverter.registerConverter(converter)
-    assertSame(converter, TypeConverter.forType[EMail])
+    try {
+      assertSame(converter, TypeConverter.forType[EMail])
+    } finally {
+      TypeConverter.unregisterConverter(converter)
+    }
   }
 
   @Test
   def testRegisterCustomConverterExtension() {
     val converter = new TypeConverter[Int] {
       def targetTypeTag = typeTag[Int]
+
       def convertPF = {
         case Some(x: Int) => x
         case None => 0
       }
     }
     TypeConverter.registerConverter(converter)
-
-    val chainedConverter = TypeConverter.forType[Int]
-    assertTrue(chainedConverter.isInstanceOf[ChainedTypeConverter[_]])
-    assertEquals(1, chainedConverter.convert(1))
-    assertEquals(2, chainedConverter.convert("2"))
-    assertEquals(3, chainedConverter.convert(Some(3)))
-    assertEquals(0, chainedConverter.convert(None))
+    try {
+      val chainedConverter = TypeConverter.forType[Int]
+      assertTrue(chainedConverter.isInstanceOf[ChainedTypeConverter[_]])
+      assertEquals(1, chainedConverter.convert(1))
+      assertEquals(2, chainedConverter.convert("2"))
+      assertEquals(3, chainedConverter.convert(Some(3)))
+      assertEquals(0, chainedConverter.convert(None))
+    } finally {
+      TypeConverter.unregisterConverter(converter)
+    }
   }
 
   @Test
